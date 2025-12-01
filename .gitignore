@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+*.egg-info/
+*.egg
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+data/
+dataset/
+*.zip
+.ipynb_checkpoints
+.DS_Store
