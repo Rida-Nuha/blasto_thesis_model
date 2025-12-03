@@ -1,21 +1,19 @@
 """
-Full Fine-tuning for 80%+ Accuracy - BALANCED CLASS WEIGHTS
+Full Fine-tuning for 80%+ Accuracy - WITH OVERSAMPLING
 
 Key changes:
-1. Unfreeze ENTIRE backbone (100% trainable)
-2. Two-stage training: freeze → unfreeze
-3. Aggressive augmentation + Mixup
-4. FIXED: Balanced sqrt weights (not too aggressive)
-5. FIXED: Higher Stage 2 LR
-6. FIXED: Swin-Small model (more capacity)
+1. WeightedRandomSampler to oversample minority classes (especially Class 1)
+2. Swin-Small model
+3. Two-stage training
+4. Mixup augmentation
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from torchvision.models import swin_s, Swin_S_Weights  # Changed to Swin-Small
+from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
+from torchvision.models import swin_s, Swin_S_Weights
 from tqdm import tqdm
 import pandas as pd
 import os
@@ -35,7 +33,7 @@ class SwinFullFinetune(nn.Module):
         super().__init__()
         
         print("Loading Swin-S pretrained model...")
-        self.backbone = swin_s(weights=Swin_S_Weights.IMAGENET1K_V1)  # Changed to Small
+        self.backbone = swin_s(weights=Swin_S_Weights.IMAGENET1K_V1)
         in_features = self.backbone.head.in_features
         
         # Enhanced head
@@ -77,20 +75,20 @@ class SwinFullFinetune(nn.Module):
 
 
 # ============================================================
-# CONFIG - OPTIMIZED FOR 80%+
+# CONFIG
 # ============================================================
 TRAIN_CSV = "data/Gardner_train_silver.csv"
 IMG_FOLDER = "data/images"
-SAVE_PATH = "saved_models/swin_full_finetune_best.pth"
-METRICS_FILE = "training_metrics_full_finetune.csv"
+SAVE_PATH = "saved_models/swin_oversampled_best.pth"
+METRICS_FILE = "training_metrics_oversampled.csv"
 
 NUM_CLASSES = 3
 DROPOUT_RATE = 0.3
-BATCH_SIZE = 24  # Optimized for Swin-S
+BATCH_SIZE = 24
 STAGE1_EPOCHS = 25
 STAGE2_EPOCHS = 30
 STAGE1_LR = 2e-3
-STAGE2_LR = 1e-4  # Increased from 5e-5
+STAGE2_LR = 1e-4
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
@@ -157,6 +155,22 @@ class TransformDataset(torch.utils.data.Dataset):
         return len(self.dataset.indices) if hasattr(self.dataset, 'indices') else len(self.dataset)
 
 
+def get_class_counts(dataset):
+    """Get class distribution from dataset"""
+    labels = []
+    for i in range(len(dataset)):
+        if hasattr(dataset, 'indices'):
+            real_idx = dataset.indices[i]
+            _, label = dataset.dataset.dataset[real_idx]
+        else:
+            _, label = dataset[i]
+        labels.append(label)
+    
+    labels = np.array(labels)
+    counts = np.bincount(labels, minlength=3)
+    return counts, labels
+
+
 # ============================================================
 # MIXUP AUGMENTATION
 # ============================================================
@@ -208,7 +222,6 @@ class LabelSmoothingCrossEntropy(nn.Module):
         n_classes = pred.size(1)
         log_probs = F.log_softmax(pred, dim=1)
         
-        # One-hot encoding with smoothing
         with torch.no_grad():
             true_dist = torch.zeros_like(pred)
             true_dist.fill_(self.smoothing / (n_classes - 1))
@@ -231,7 +244,6 @@ def train_epoch(model, loader, criterion, optimizer, device, use_mixup=False):
     for images, labels in pbar:
         images, labels = images.to(device), labels.to(device)
         
-        # Apply mixup 50% of the time in Stage 2
         if use_mixup and np.random.random() > 0.5:
             images, labels_a, labels_b, lam = mixup_data(images, labels, alpha=0.4)
             
@@ -268,7 +280,6 @@ def validate(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0, 0, 0
     
-    # Per-class accuracy
     class_correct = torch.zeros(3)
     class_total = torch.zeros(3)
     
@@ -285,7 +296,6 @@ def validate(model, loader, criterion, device):
             correct += (preds == labels).sum().item()
             total += labels.size(0)
             
-            # Per-class
             for c in range(3):
                 mask = labels == c
                 if mask.sum() > 0:
@@ -304,7 +314,7 @@ def validate(model, loader, criterion, device):
 # ============================================================
 def main():
     print("\n" + "="*70)
-    print("TWO-STAGE FULL FINE-TUNING FOR 80%+ ACCURACY")
+    print("TWO-STAGE FINE-TUNING WITH OVERSAMPLING FOR 80%+")
     print("="*70 + "\n")
     
     set_seed(SEED)
@@ -314,7 +324,7 @@ def main():
     print("Loading dataset...")
     full_dataset = BlastocystDataset(TRAIN_CSV, IMG_FOLDER, transform=None)
     
-    # Split with more training data
+    # Split
     train_size = int(TRAIN_SPLIT * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
@@ -324,41 +334,67 @@ def main():
     
     print(f"\nTrain: {len(train_ds)}, Val: {len(val_ds)}")
     
-    # Dataloaders
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, 
-                             num_workers=NUM_WORKERS, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                           num_workers=NUM_WORKERS, pin_memory=True)
+    # Get class distribution and create weighted sampler
+    print("\n" + "="*70)
+    print("CREATING WEIGHTED SAMPLER FOR OVERSAMPLING")
+    print("="*70)
+    
+    counts, train_labels = get_class_counts(train_ds)
+    print(f"\nTraining set class distribution:")
+    print(f"  Class 0 (Poor): {counts[0]} samples")
+    print(f"  Class 1 (Medium): {counts[1]} samples")
+    print(f"  Class 2 (Good): {counts[2]} samples")
+    
+    # Compute sample weights - inverse frequency
+    class_weights_for_sampler = 1.0 / counts
+    sample_weights = class_weights_for_sampler[train_labels]
+    
+    # Boost Class 1 even more
+    sample_weights[train_labels == 1] *= 2.0  # Double the sampling rate for Class 1
+    
+    print(f"\nSample weights for each class:")
+    print(f"  Class 0: {class_weights_for_sampler[0]:.4f}")
+    print(f"  Class 1: {class_weights_for_sampler[1] * 2.0:.4f} (2x boosted)")
+    print(f"  Class 2: {class_weights_for_sampler[2]:.4f}")
+    
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    
+    # Dataloaders with sampler (don't use shuffle with sampler)
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=BATCH_SIZE, 
+        sampler=sampler,  # Use sampler instead of shuffle
+        num_workers=NUM_WORKERS, 
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_ds, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False,
+        num_workers=NUM_WORKERS, 
+        pin_memory=True
+    )
+    
+    print(f"\n✅ Oversampling enabled - Class 1 will appear 2x more frequently in training")
     
     # Model
     print("\nInitializing model...")
     model = SwinFullFinetune(NUM_CLASSES, DROPOUT_RATE)
     model.to(DEVICE)
     
-    # Loss - BALANCED SQRT CLASS WEIGHTING
-    print("\n" + "="*70)
-    print("COMPUTING BALANCED CLASS WEIGHTS")
-    print("="*70)
-    
-    # Get class distribution from dataset
-    counts = np.array([1305, 332, 391])  # Poor, Medium, Good
-    print(f"Class counts: {counts}")
-    print(f"  Class 0 (Poor): {counts[0]}")
-    print(f"  Class 1 (Medium): {counts[1]}")
-    print(f"  Class 2 (Good): {counts[2]}")
-    
-    # Square root balancing (gentler than inverse, stronger than none)
-    sqrt_weights = np.sqrt(counts.sum() / counts)
-    class_weights = torch.FloatTensor(sqrt_weights).to(DEVICE)
-    
-    print(f"\nBalanced sqrt weights: {class_weights.cpu().numpy()}")
-    print("(These weights help minorities without killing any class)\n")
+    # Use moderate class weights for loss (oversampling handles the rest)
+    class_weights = torch.tensor([0.8, 1.5, 1.2]).float().to(DEVICE)
+    print(f"\nLoss class weights: {class_weights.cpu().numpy()}")
     
     metrics = []
     best_val_acc = 0
     
     # ========================================================================
-    # STAGE 1: Train head only (frozen backbone)
+    # STAGE 1: Train head only
     # ========================================================================
     print("\n" + "="*70)
     print("STAGE 1: TRAINING HEAD ONLY (Backbone Frozen)")
@@ -405,7 +441,7 @@ def main():
         print()
     
     # ========================================================================
-    # STAGE 2: Fine-tune everything
+    # STAGE 2: Full fine-tuning
     # ========================================================================
     print("\n" + "="*70)
     print("STAGE 2: FULL FINE-TUNING (Backbone Unfrozen)")
@@ -414,11 +450,8 @@ def main():
     model.unfreeze_backbone()
     model.print_params()
     
-    # Use same balanced weights for Stage 2 with Focal Loss
-    print(f"Stage 2 weights (same balanced): {class_weights.cpu().numpy()}")
     criterion = FocalLoss(alpha=class_weights, gamma=2.0)
     
-    # Layer-wise LR with better ratios
     optimizer = optim.AdamW([
         {'params': model.backbone.features[0:2].parameters(), 'lr': STAGE2_LR * 0.1},
         {'params': model.backbone.features[2:4].parameters(), 'lr': STAGE2_LR * 0.3},
@@ -475,7 +508,7 @@ def main():
     pd.DataFrame(metrics).to_csv(METRICS_FILE, index=False)
     print(f"\n✅ Metrics saved: {METRICS_FILE}")
     
-    # Load best model and final evaluation
+    # Final evaluation
     try:
         model.load_state_dict(torch.load(SAVE_PATH.replace('.pth', '_best_acc.pth'), weights_only=True))
         val_loss, val_acc, per_class = validate(model, val_loader, criterion, DEVICE)
@@ -496,7 +529,7 @@ def main():
     elif best_val_acc >= 75:
         print(f"\n✓ Good! Close to thesis quality")
     else:
-        print(f"\n⚠️ Consider ensemble methods or more data augmentation")
+        print(f"\n⚠️ Consider ensemble methods")
     
     print("="*70 + "\n")
 
