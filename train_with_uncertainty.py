@@ -51,7 +51,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ============================================================
 class GardnerDataset(Dataset):
     def __init__(self, csv_file, img_folder, target_column, threshold=2, transform=None):
-        self.df = pd.read_csv(csv_file)
+        self.df = pd.read_csv(csv_file, sep=';')
         self.img_folder = img_folder
         self.target_column = target_column
         self.threshold = threshold
