@@ -1,11 +1,11 @@
 """
-Full Fine-tuning for 80%+ Accuracy - OPTIMIZED FOR CLASS IMBALANCE
+Full Fine-tuning for 80%+ Accuracy - BALANCED CLASS WEIGHTS
 
 Key changes:
 1. Unfreeze ENTIRE backbone (100% trainable)
 2. Two-stage training: freeze → unfreeze
 3. Aggressive augmentation + Mixup
-4. FIXED: Stronger Class 0 weighting
+4. FIXED: Balanced sqrt weights (not too aggressive)
 5. FIXED: Higher Stage 2 LR
 6. FIXED: Swin-Small model (more capacity)
 """
@@ -85,16 +85,16 @@ SAVE_PATH = "saved_models/swin_full_finetune_best.pth"
 METRICS_FILE = "training_metrics_full_finetune.csv"
 
 NUM_CLASSES = 3
-DROPOUT_RATE = 0.3  # Increased dropout
+DROPOUT_RATE = 0.3
 BATCH_SIZE = 24  # Optimized for Swin-S
 STAGE1_EPOCHS = 25
-STAGE2_EPOCHS = 30  # Reduced to prevent overfitting
+STAGE2_EPOCHS = 30
 STAGE1_LR = 2e-3
 STAGE2_LR = 1e-4  # Increased from 5e-5
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
-PATIENCE = 12  # More aggressive early stopping
+PATIENCE = 12
 SEED = 42
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -183,7 +183,7 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 # FOCAL LOSS
 # ============================================================
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.5):  # Increased gamma
+    def __init__(self, alpha=None, gamma=2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -335,14 +335,24 @@ def main():
     model = SwinFullFinetune(NUM_CLASSES, DROPOUT_RATE)
     model.to(DEVICE)
     
-    # Loss - AGGRESSIVE CLASS WEIGHTING FOR CLASS 0
-    class_weights_original = full_dataset.get_class_weights().to(DEVICE)
-    print(f"\nOriginal class weights: {class_weights_original.cpu().numpy()}")
+    # Loss - BALANCED SQRT CLASS WEIGHTING
+    print("\n" + "="*70)
+    print("COMPUTING BALANCED CLASS WEIGHTS")
+    print("="*70)
     
-    # Manual aggressive weighting - boost all classes but especially Class 1 and 2
-    class_weights = torch.tensor([2.0, 5.0, 4.0]).float().to(DEVICE)
-    print(f"Boosted class weights: {class_weights.cpu().numpy()}")
-    print("(Higher weight = model pays more attention to that class)")
+    # Get class distribution from dataset
+    counts = np.array([1305, 332, 391])  # Poor, Medium, Good
+    print(f"Class counts: {counts}")
+    print(f"  Class 0 (Poor): {counts[0]}")
+    print(f"  Class 1 (Medium): {counts[1]}")
+    print(f"  Class 2 (Good): {counts[2]}")
+    
+    # Square root balancing (gentler than inverse, stronger than none)
+    sqrt_weights = np.sqrt(counts.sum() / counts)
+    class_weights = torch.FloatTensor(sqrt_weights).to(DEVICE)
+    
+    print(f"\nBalanced sqrt weights: {class_weights.cpu().numpy()}")
+    print("(These weights help minorities without killing any class)\n")
     
     metrics = []
     best_val_acc = 0
@@ -404,10 +414,9 @@ def main():
     model.unfreeze_backbone()
     model.print_params()
     
-    # Switch to Focal Loss with EVEN MORE aggressive weights for stage 2
-    alpha_stage2 = torch.tensor([2.5, 6.0, 5.0]).float().to(DEVICE)
-    print(f"Stage 2 boosted weights: {alpha_stage2.cpu().numpy()}")
-    criterion = FocalLoss(alpha=alpha_stage2, gamma=2.5)
+    # Use same balanced weights for Stage 2 with Focal Loss
+    print(f"Stage 2 weights (same balanced): {class_weights.cpu().numpy()}")
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0)
     
     # Layer-wise LR with better ratios
     optimizer = optim.AdamW([
@@ -477,10 +486,10 @@ def main():
     print("📊 FINAL RESULTS:")
     print("="*70)
     print(f"Best Val Accuracy: {best_val_acc:.2f}%")
-    print(f"Per-class Accuracy: {per_class.numpy().round(1)}")
-    print(f"  Class 0 (Poor): {per_class[0]:.1f}%")
+    print(f"\nPer-class Accuracy:")
+    print(f"  Class 0 (Poor):   {per_class[0]:.1f}%")
     print(f"  Class 1 (Medium): {per_class[1]:.1f}%")
-    print(f"  Class 2 (Good): {per_class[2]:.1f}%")
+    print(f"  Class 2 (Good):   {per_class[2]:.1f}%")
     
     if best_val_acc >= 80:
         print(f"\n✅ EXCELLENT! Thesis-quality result!")
