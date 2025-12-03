@@ -1,11 +1,7 @@
 """
-Comprehensive Uncertainty Evaluation with Full Metrics
-- Accuracy, Precision, Recall, F1-Score
-- AUC-ROC Curve
-- Confusion Matrix
-- Uncertainty Analysis
-- Calibration Analysis
-- Clinical Decision Support
+Comprehensive Uncertainty Evaluation for Embryo Quality Prediction
+Complete evaluation with all metrics: Accuracy, Precision, Recall, F1, AUC-ROC, Confusion Matrix
+Novel Contribution: Hybrid Uncertainty Quantification (Ensemble + MC Dropout)
 """
 
 import torch
@@ -28,12 +24,13 @@ from sklearn.metrics import (
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION - UPDATE THESE PATHS
 # ============================================================
-TARGET_SCORE = "EXP_silver"  # Change to match training
+TARGET_SCORE = "EXP_silver"  # Options: "EXP_silver", "ICM_silver", "TE_silver"
 
+# Update these paths to match your dataset location
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
-TEST_CSV = "/kaggle/input/dataset/Gardner_test_silver.csv"
+TEST_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"  # Change if you have separate test file
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 MODEL_DIR = "saved_models/uncertainty"
 OUTPUT_DIR = "uncertainty_results"
@@ -42,6 +39,7 @@ BINARY_THRESHOLD = 2
 NUM_CLASSES = 2
 BATCH_SIZE = 32
 NUM_WORKERS = 2
+TRAIN_SPLIT = 0.85  # Use same split as training for validation
 MC_SAMPLES = 20  # MC Dropout iterations
 
 SEEDS = [42, 123, 456, 789, 2024]
@@ -54,7 +52,18 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ============================================================
 class GardnerDataset(torch.utils.data.Dataset):
     def __init__(self, csv_file, img_folder, target_column, threshold=2, transform=None):
-        self.df = pd.read_csv(csv_file, sep=';')
+        # Handle both CSV and Excel files
+        if csv_file.endswith('.xlsx') or csv_file.endswith('.xls'):
+            self.df = pd.read_excel(csv_file)
+        elif csv_file.endswith('.csv'):
+            # Try with semicolon separator first, then comma
+            try:
+                self.df = pd.read_csv(csv_file, sep=';')
+            except:
+                self.df = pd.read_csv(csv_file)
+        else:
+            self.df = pd.read_csv(csv_file)
+        
         self.img_folder = img_folder
         self.target_column = target_column
         self.transform = transform
@@ -109,11 +118,13 @@ class SwinWithUncertainty(nn.Module):
         return self.backbone(x)
     
     def enable_dropout(self):
+        """Enable dropout layers for MC inference"""
         for module in self.modules():
             if isinstance(module, nn.Dropout):
                 module.train()
     
     def mc_predict(self, x, n_samples=20):
+        """Monte Carlo Dropout prediction for uncertainty estimation"""
         self.eval()
         self.enable_dropout()
         
@@ -136,7 +147,10 @@ class SwinWithUncertainty(nn.Module):
 # ENSEMBLE PREDICTION WITH UNCERTAINTY
 # ============================================================
 def ensemble_predict_with_uncertainty(models, loader, device, mc_samples=20):
-    """Comprehensive prediction with all metrics"""
+    """
+    Comprehensive prediction with ensemble + MC Dropout
+    Returns predictions, labels, uncertainties, confidences, and probabilities
+    """
     
     all_ensemble_probs = []
     all_mc_entropies = []
@@ -150,6 +164,7 @@ def ensemble_predict_with_uncertainty(models, loader, device, mc_samples=20):
         batch_mc_entropies = []
         batch_mc_variances = []
         
+        # Get predictions from each model with MC Dropout
         for model in models:
             mean_pred, entropy, variance = model.mc_predict(images, n_samples=mc_samples)
             
@@ -175,7 +190,7 @@ def ensemble_predict_with_uncertainty(models, loader, device, mc_samples=20):
     # Final predictions
     predictions = torch.argmax(all_ensemble_probs, dim=1).numpy()
     confidences = torch.max(all_ensemble_probs, dim=1)[0].numpy()
-    probs_class1 = all_ensemble_probs[:, 1].numpy()  # For AUC
+    probs_class1 = all_ensemble_probs[:, 1].numpy()  # For AUC-ROC
     
     total_uncertainty = all_mc_entropies.numpy()
     
@@ -192,17 +207,20 @@ def compute_all_metrics(predictions, labels, probs_class1):
     
     # Basic metrics
     metrics['accuracy'] = accuracy_score(labels, predictions)
-    metrics['precision'] = precision_score(labels, predictions, average='binary')
-    metrics['recall'] = recall_score(labels, predictions, average='binary')
-    metrics['f1_score'] = f1_score(labels, predictions, average='binary')
+    metrics['precision'] = precision_score(labels, predictions, average='binary', zero_division=0)
+    metrics['recall'] = recall_score(labels, predictions, average='binary', zero_division=0)
+    metrics['f1_score'] = f1_score(labels, predictions, average='binary', zero_division=0)
     
     # AUC-ROC
-    metrics['auc_roc'] = roc_auc_score(labels, probs_class1)
+    try:
+        metrics['auc_roc'] = roc_auc_score(labels, probs_class1)
+    except:
+        metrics['auc_roc'] = 0.0
     
     # Per-class metrics
-    metrics['precision_per_class'] = precision_score(labels, predictions, average=None)
-    metrics['recall_per_class'] = recall_score(labels, predictions, average=None)
-    metrics['f1_per_class'] = f1_score(labels, predictions, average=None)
+    metrics['precision_per_class'] = precision_score(labels, predictions, average=None, zero_division=0)
+    metrics['recall_per_class'] = recall_score(labels, predictions, average=None, zero_division=0)
+    metrics['f1_per_class'] = f1_score(labels, predictions, average=None, zero_division=0)
     
     # Confusion matrix
     metrics['confusion_matrix'] = confusion_matrix(labels, predictions)
@@ -239,9 +257,10 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
     
     # Add accuracy per class
     for i in range(2):
-        acc = cm[i, i] / cm[i].sum() * 100
-        plt.text(i+0.5, i-0.3, f'{acc:.1f}%', ha='center', va='center', 
-                color='red', fontsize=10, fontweight='bold')
+        if cm[i].sum() > 0:
+            acc = cm[i, i] / cm[i].sum() * 100
+            plt.text(i+0.5, i-0.3, f'{acc:.1f}%', ha='center', va='center', 
+                    color='red', fontsize=10, fontweight='bold')
     
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, 'confusion_matrix.png'), dpi=300, bbox_inches='tight')
@@ -250,24 +269,27 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
     # ========================================
     # PLOT 2: ROC Curve
     # ========================================
-    fpr, tpr, thresholds = roc_curve(labels, probs_class1)
-    auc = roc_auc_score(labels, probs_class1)
-    
-    plt.figure(figsize=(8, 8))
-    plt.plot(fpr, tpr, linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})', color='blue')
-    plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier')
-    plt.fill_between(fpr, tpr, alpha=0.2, color='blue')
-    
-    plt.xlabel('False Positive Rate', fontsize=12)
-    plt.ylabel('True Positive Rate', fontsize=12)
-    plt.title(f'ROC Curve - {TARGET_SCORE}', fontsize=14, fontweight='bold')
-    plt.legend(loc='lower right', fontsize=11)
-    plt.grid(True, alpha=0.3)
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'roc_curve.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+    try:
+        fpr, tpr, thresholds = roc_curve(labels, probs_class1)
+        auc = roc_auc_score(labels, probs_class1)
+        
+        plt.figure(figsize=(8, 8))
+        plt.plot(fpr, tpr, linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})', color='blue')
+        plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random Classifier')
+        plt.fill_between(fpr, tpr, alpha=0.2, color='blue')
+        
+        plt.xlabel('False Positive Rate', fontsize=12)
+        plt.ylabel('True Positive Rate', fontsize=12)
+        plt.title(f'ROC Curve - {TARGET_SCORE}', fontsize=14, fontweight='bold')
+        plt.legend(loc='lower right', fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'roc_curve.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+    except Exception as e:
+        print(f"Warning: Could not generate ROC curve: {e}")
     
     # ========================================
     # PLOT 3: Uncertainty Distribution
@@ -295,8 +317,9 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
     plt.subplot(1, 3, 3)
     plt.scatter(confidences[correct], uncertainties[correct], alpha=0.5, s=20, 
                c='green', label='Correct', edgecolors='none')
-    plt.scatter(confidences[~correct], uncertainties[~correct], alpha=0.8, s=30, 
-               c='red', label='Incorrect', edgecolors='black', linewidths=0.5)
+    if (~correct).sum() > 0:
+        plt.scatter(confidences[~correct], uncertainties[~correct], alpha=0.8, s=30, 
+                   c='red', label='Incorrect', edgecolors='black', linewidths=0.5)
     plt.xlabel('Confidence', fontsize=11)
     plt.ylabel('Uncertainty', fontsize=11)
     plt.title('Confidence vs Uncertainty', fontsize=12, fontweight='bold')
@@ -332,14 +355,15 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
     
     # Highlight key points
     for reject_pct in [10, 20]:
-        idx = int(reject_pct)
-        plt.plot(reject_pct, accuracies[idx], 'o', markersize=10, color='orange')
-        improvement = accuracies[idx] - baseline_acc
-        plt.annotate(f'{accuracies[idx]:.2f}% (+{improvement:.2f}%)', 
-                    xy=(reject_pct, accuracies[idx]), 
-                    xytext=(reject_pct+5, accuracies[idx]-1),
-                    fontsize=10, fontweight='bold',
-                    bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
+        if reject_pct < len(accuracies):
+            idx = int(reject_pct)
+            plt.plot(reject_pct, accuracies[idx], 'o', markersize=10, color='orange')
+            improvement = accuracies[idx] - baseline_acc
+            plt.annotate(f'{accuracies[idx]:.2f}% (+{improvement:.2f}%)', 
+                        xy=(reject_pct, accuracies[idx]), 
+                        xytext=(reject_pct+5, accuracies[idx]-1),
+                        fontsize=10, fontweight='bold',
+                        bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
     
     plt.xlabel('Rejection Rate (%)', fontsize=12)
     plt.ylabel('Accuracy (%)', fontsize=12)
@@ -372,29 +396,30 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
             bin_confidences.append(bin_confidence)
             bin_counts.append(in_bin.sum())
     
-    plt.figure(figsize=(8, 8))
-    plt.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfect Calibration')
-    plt.plot(bin_confidences, bin_accuracies, 'o-', linewidth=2, markersize=10, 
-            color='blue', label='Model Calibration')
-    
-    # Add bin counts as text
-    for i, (conf, acc, count) in enumerate(zip(bin_confidences, bin_accuracies, bin_counts)):
-        plt.text(conf, acc-0.05, f'n={count}', ha='center', fontsize=8, color='gray')
-    
-    # Expected Calibration Error
-    ece = np.average(np.abs(np.array(bin_accuracies) - np.array(bin_confidences)), 
-                    weights=bin_counts)
-    
-    plt.xlabel('Confidence', fontsize=12)
-    plt.ylabel('Accuracy', fontsize=12)
-    plt.title(f'Calibration Plot - {TARGET_SCORE}\nECE = {ece:.4f}', fontsize=14, fontweight='bold')
-    plt.legend(loc='upper left', fontsize=11)
-    plt.grid(True, alpha=0.3)
-    plt.xlim([0, 1])
-    plt.ylim([0, 1])
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'calibration_plot.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+    if len(bin_accuracies) > 0:
+        plt.figure(figsize=(8, 8))
+        plt.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfect Calibration')
+        plt.plot(bin_confidences, bin_accuracies, 'o-', linewidth=2, markersize=10, 
+                color='blue', label='Model Calibration')
+        
+        # Add bin counts as text
+        for i, (conf, acc, count) in enumerate(zip(bin_confidences, bin_accuracies, bin_counts)):
+            plt.text(conf, acc-0.05, f'n={count}', ha='center', fontsize=8, color='gray')
+        
+        # Expected Calibration Error
+        ece = np.average(np.abs(np.array(bin_accuracies) - np.array(bin_confidences)), 
+                        weights=bin_counts)
+        
+        plt.xlabel('Confidence', fontsize=12)
+        plt.ylabel('Accuracy', fontsize=12)
+        plt.title(f'Calibration Plot - {TARGET_SCORE}\nECE = {ece:.4f}', fontsize=14, fontweight='bold')
+        plt.legend(loc='upper left', fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.xlim([0, 1])
+        plt.ylim([0, 1])
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'calibration_plot.png'), dpi=300, bbox_inches='tight')
+        plt.close()
     
     # ========================================
     # PLOT 6: Per-Class Performance
@@ -403,9 +428,9 @@ def plot_comprehensive_results(predictions, labels, uncertainties, confidences, 
     class_names = ['Poor (0)', 'Good (1)']
     
     # Calculate per-class metrics
-    precision_per_class = precision_score(labels, predictions, average=None)
-    recall_per_class = recall_score(labels, predictions, average=None)
-    f1_per_class = f1_score(labels, predictions, average=None)
+    precision_per_class = precision_score(labels, predictions, average=None, zero_division=0)
+    recall_per_class = recall_score(labels, predictions, average=None, zero_division=0)
+    f1_per_class = f1_score(labels, predictions, average=None, zero_division=0)
     
     x = np.arange(len(class_names))
     width = 0.25
@@ -450,8 +475,14 @@ def main():
     
     # Load test dataset
     print(f"Loading test dataset: {TEST_CSV}")
-    test_dataset = GardnerDataset(TEST_CSV, IMG_FOLDER, TARGET_SCORE, 
+    full_dataset = GardnerDataset(TEST_CSV, IMG_FOLDER, TARGET_SCORE, 
                                   threshold=BINARY_THRESHOLD, transform=val_transform)
+    
+    # Use validation split (same as training)
+    from torch.utils.data import random_split
+    train_size = int(TRAIN_SPLIT * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    _, test_dataset = random_split(full_dataset, [train_size, val_size])
     
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=NUM_WORKERS, pin_memory=True)
@@ -530,10 +561,12 @@ def main():
     print(f"Correct predictions:")
     print(f"  Mean uncertainty: {uncertainties[correct].mean():.4f}")
     print(f"  Mean confidence:  {confidences[correct].mean():.4f}")
-    print(f"\nIncorrect predictions:")
-    print(f"  Mean uncertainty: {uncertainties[~correct].mean():.4f}")
-    print(f"  Mean confidence:  {confidences[~correct].mean():.4f}")
-    print(f"\nUncertainty ratio (Incorrect/Correct): {uncertainties[~correct].mean()/uncertainties[correct].mean():.2f}x")
+    
+    if (~correct).sum() > 0:
+        print(f"\nIncorrect predictions:")
+        print(f"  Mean uncertainty: {uncertainties[~correct].mean():.4f}")
+        print(f"  Mean confidence:  {confidences[~correct].mean():.4f}")
+        print(f"\nUncertainty ratio (Incorrect/Correct): {uncertainties[~correct].mean()/uncertainties[correct].mean():.2f}x")
     
     # Rejection analysis
     print(f"\n{'Rejection-Based Accuracy':^40}")
@@ -570,8 +603,8 @@ def main():
         'f1_score': metrics['f1_score'],
         'auc_roc': metrics['auc_roc'],
         'mean_uncertainty_correct': uncertainties[correct].mean(),
-        'mean_uncertainty_incorrect': uncertainties[~correct].mean(),
-        'uncertainty_ratio': uncertainties[~correct].mean()/uncertainties[correct].mean()
+        'mean_uncertainty_incorrect': uncertainties[~correct].mean() if (~correct).sum() > 0 else 0,
+        'uncertainty_ratio': uncertainties[~correct].mean()/uncertainties[correct].mean() if (~correct).sum() > 0 else 0
     }
     
     summary_df = pd.DataFrame([summary])
