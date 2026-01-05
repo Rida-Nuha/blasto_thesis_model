@@ -1,25 +1,94 @@
 """
-ICM EVALUATION - Check Confusion Matrix
+confu_icm_check.py - Standalone ICM Confusion Matrix Check
 """
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from torchvision.models import swin_t, Swin_T_Weights
+from PIL import Image
 import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 from tqdm import tqdm
+import os
 
-# ============================================================
-# LOAD VALIDATION DATA
-# ============================================================
-print("Loading validation data...")
+# ====== DEVICE ======
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ====== PATHS ======
+TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
+IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
+MODEL_DIR = "saved_models/uncertainty_ICM"
+
+# ====== DATASET CLASS ======
+class EmbryoDataset(Dataset):
+    def __init__(self, df, img_folder, transform=None):
+        self.df = df.reset_index(drop=True)
+        self.img_folder = img_folder
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, idx):
+        img_name = self.df.loc[idx, 'Image']
+        label = self.df.loc[idx, 'label']
+        
+        img_path = os.path.join(self.img_folder, img_name)
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, torch.tensor(label, dtype=torch.long)
+
+# ====== MODEL CLASS ======
+class SwinEmbryoClassifier(nn.Module):
+    def __init__(self, num_classes=2, dropout=0.4):
+        super().__init__()
+        self.backbone = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
+        in_features = self.backbone.head.in_features
+        self.backbone.head = nn.Identity()
+        
+        self.classifier = nn.Sequential(
+            nn.BatchNorm1d(in_features),
+            nn.Dropout(dropout),
+            nn.Linear(in_features, 512),
+            nn.GELU(),
+            nn.BatchNorm1d(512),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, num_classes)
+        )
+    
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.classifier(features)
+
+# ====== LOAD DATA ======
+print("Loading data...")
+df = pd.read_csv(TRAIN_CSV, sep=';')
+df['label'] = df['ICM_silver'].apply(lambda x: 1 if x >= 2 else 0)
+
+train_df, val_df = train_test_split(
+    df, test_size=0.15, random_state=42, stratify=df['label']
+)
+
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
 
 val_dataset = EmbryoDataset(val_df, IMG_FOLDER, val_transform)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
-# ============================================================
-# LOAD TRAINED MODELS
-# ============================================================
+# ====== LOAD MODELS ======
 print("\nLoading trained ICM models...")
 
 models = []
@@ -27,16 +96,14 @@ SEEDS = [42, 123, 456, 789, 2024]
 
 for seed in SEEDS:
     model = SwinEmbryoClassifier().to(device)
-    model_path = f"saved_models/uncertainty_ICM/ICM_silver_seed{seed}_best.pth"
+    model_path = f"{MODEL_DIR}/ICM_silver_seed{seed}_best.pth"
     model.load_state_dict(torch.load(model_path))
     model.eval()
     models.append(model)
     print(f"✓ Loaded seed {seed}")
 
-# ============================================================
-# GET PREDICTIONS (Simple, No Uncertainty)
-# ============================================================
-print("\nGetting predictions on validation set...")
+# ====== GET PREDICTIONS ======
+print("\nGetting predictions...")
 
 all_predictions = []
 all_labels = []
@@ -45,35 +112,28 @@ with torch.no_grad():
     for images, labels in tqdm(val_loader):
         images = images.to(device)
         
-        # Average across 5 models
         batch_outputs = []
         for model in models:
             outputs = model(images)
             batch_outputs.append(outputs)
         
-        # Average predictions
         avg_outputs = torch.stack(batch_outputs).mean(dim=0)
         _, preds = torch.max(avg_outputs, 1)
         
         all_predictions.extend(preds.cpu().numpy())
         all_labels.extend(labels.numpy())
 
-# Convert to numpy
 val_preds = np.array(all_predictions)
 val_labels = np.array(all_labels)
 
-# ============================================================
-# CONFUSION MATRIX & ANALYSIS
-# ============================================================
+# ====== ANALYSIS ======
 print("\n" + "="*70)
 print("ICM EVALUATION RESULTS")
 print("="*70)
 
-# Accuracy
 accuracy = accuracy_score(val_labels, val_preds)
 print(f"\n✓ Overall Accuracy: {accuracy*100:.2f}%")
 
-# Confusion Matrix
 cm = confusion_matrix(val_labels, val_preds)
 print(f"\nConfusion Matrix:")
 print("                 Predicted")
@@ -81,61 +141,19 @@ print("                 Poor  Good")
 print(f"Actual Poor     {cm[0,0]:4d}  {cm[0,1]:4d}")
 print(f"       Good     {cm[1,0]:4d}  {cm[1,1]:4d}")
 
-# Per-class metrics
 poor_recall = cm[0,0] / (cm[0,0] + cm[0,1])
 good_recall = cm[1,1] / (cm[1,0] + cm[1,1])
-poor_precision = cm[0,0] / (cm[0,0] + cm[1,0]) if (cm[0,0] + cm[1,0]) > 0 else 0
-good_precision = cm[1,1] / (cm[0,1] + cm[1,1]) if (cm[0,1] + cm[1,1]) > 0 else 0
 
-print(f"\nPer-Class Performance:")
-print(f"  Poor (ICM < 2):")
-print(f"    Recall (Sensitivity):  {poor_recall*100:.1f}%")
-print(f"    Precision:             {poor_precision*100:.1f}%")
-print(f"  Good (ICM >= 2):")
-print(f"    Recall (Sensitivity):  {good_recall*100:.1f}%")
-print(f"    Precision:             {good_precision*100:.1f}%")
+print(f"\nPer-Class Recall:")
+print(f"  Poor: {poor_recall*100:.1f}%")
+print(f"  Good: {good_recall*100:.1f}%")
 
-# Classification Report
-print(f"\n{'Full Classification Report':^70}")
-print("-" * 70)
+print(f"\nClassification Report:")
 print(classification_report(val_labels, val_preds, 
-                          target_names=['Poor (ICM<2)', 'Good (ICM>=2)'],
+                          target_names=['Poor', 'Good'],
                           digits=4))
 
-# ============================================================
-# SANITY CHECKS
-# ============================================================
-print("\n" + "="*70)
-print("SANITY CHECKS")
-print("="*70)
-
-# Check if predicting only one class
-unique_preds = np.unique(val_preds)
-print(f"\nUnique predictions: {unique_preds}")
-print(f"  → Model predicts {len(unique_preds)} different classes")
-
-if len(unique_preds) == 1:
-    print("  ⚠️⚠️⚠️ WARNING: Model only predicts ONE class! ⚠️⚠️⚠️")
-else:
-    print("  ✓ Model predicts both classes")
-
-# Check balance
-pred_counts = np.bincount(val_preds)
-print(f"\nPrediction distribution:")
-print(f"  Predicted Poor: {pred_counts[0]} ({pred_counts[0]/len(val_preds)*100:.1f}%)")
-print(f"  Predicted Good: {pred_counts[1]} ({pred_counts[1]/len(val_preds)*100:.1f}%)")
-
-# Compare to baseline
-baseline_acc = val_labels.value_counts().max() / len(val_labels) * 100
-print(f"\nBaseline (majority class): {max(np.bincount(val_labels))/len(val_labels)*100:.1f}%")
-print(f"Your model accuracy: {accuracy*100:.2f}%")
-print(f"Improvement over baseline: {(accuracy*100) - (max(np.bincount(val_labels))/len(val_labels)*100):.2f}%")
-
-print("\n" + "="*70)
 if good_recall > 0.80 and poor_recall > 0.80:
-    print("✅ REAL PERFORMANCE! Both classes learned well!")
-elif good_recall < 0.50:
-    print("⚠️ WARNING: Poor performance on Good class (minority)")
+    print("\n✅ REAL PERFORMANCE! Both classes learned well!")
 else:
-    print("✓ Performance looks reasonable")
-print("="*70)
+    print("\n⚠️ Check if model is biased")
