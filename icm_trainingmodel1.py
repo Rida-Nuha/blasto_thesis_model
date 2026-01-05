@@ -1,5 +1,6 @@
 """
 ICM (Inner Cell Mass) Quality Prediction with Uncertainty Quantification
+Complete Training Code with Model Archiving
 Swin Transformer + Deep Ensembles + MC Dropout
 """
 
@@ -13,10 +14,11 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, confusion_matrix, classification_report
 from tqdm import tqdm
 import os
 import warnings
+import shutil
 warnings.filterwarnings('ignore')
 
 # ============================================================
@@ -28,11 +30,11 @@ IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 MODEL_DIR = "saved_models/uncertainty_ICM"
 OUTPUT_DIR = "uncertainty_results_ICM"
 BATCH_SIZE = 32
-NUM_EPOCHS = 60  # ← Longer for harder task
+NUM_EPOCHS = 60
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 5e-4
 SEEDS = [42, 123, 456, 789, 2024]
-PATIENCE = 20  # ← More patience for harder task
+PATIENCE = 20
 MC_DROPOUT_SAMPLES = 50
 
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -76,7 +78,7 @@ df = pd.read_csv(TRAIN_CSV, sep=';')
 # Check unique values
 print(f"Unique {TARGET_SCORE} values: {sorted(df[TARGET_SCORE].unique())}")
 
-# Binary conversion: ICM >= 2 is Good (adjust based on distribution analysis)
+# Binary conversion: ICM >= 2 is Good
 df['label'] = df[TARGET_SCORE].apply(lambda x: 1 if x >= 2 else 0)
 
 # Train-validation split
@@ -100,24 +102,24 @@ class_counts = train_df['label'].value_counts().sort_index().values
 class_weights = len(train_df) / (2 * class_counts)
 
 # If very imbalanced, boost minority class more
-if min(class_counts) / max(class_counts) < 0.25:  # If minority < 25%
+if min(class_counts) / max(class_counts) < 0.25:
     minority_idx = class_counts.argmin()
-    class_weights[minority_idx] *= 1.5  # Boost by 50%
-    print(f"\n⚠ High imbalance detected! Boosting minority class weight.")
+    class_weights[minority_idx] *= 1.5
+    print(f"\n⚠️ High imbalance detected! Boosting minority class weight.")
 
 class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
 print(f"\nClass weights: {class_weights.cpu().numpy()}")
 
 # ============================================================
-# TRANSFORMS (More aggressive for ICM)
+# TRANSFORMS
 # ============================================================
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
-    transforms.RandomRotation(25),  # ← More rotation
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),  # ← More augmentation
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),  # ← Add shift
+    transforms.RandomRotation(25),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
@@ -129,10 +131,10 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# MODEL (Same as TE)
+# MODEL
 # ============================================================
 class SwinEmbryoClassifier(nn.Module):
-    def __init__(self, num_classes=2, dropout=0.4):  # ← Higher dropout for ICM
+    def __init__(self, num_classes=2, dropout=0.4):
         super().__init__()
         self.backbone = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
         in_features = self.backbone.head.in_features
@@ -159,7 +161,7 @@ class SwinEmbryoClassifier(nn.Module):
 # FOCAL LOSS
 # ============================================================
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.5):  # ← Higher gamma for harder task
+    def __init__(self, alpha=None, gamma=2.5):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
@@ -259,14 +261,20 @@ def train_model(seed):
             patience_counter = 0
             save_path = f"{MODEL_DIR}/ICM_silver_seed{seed}_best.pth"
             torch.save(model.state_dict(), save_path)
-            print(f"  ✓ Best model saved! Accuracy: {best_acc*100:.2f}%")
+            
+            # Verify file was saved
+            if os.path.exists(save_path):
+                file_size = os.path.getsize(save_path) / (1024*1024)
+                print(f"  ✓ Best model saved! Accuracy: {best_acc*100:.2f}% ({file_size:.1f} MB)")
+            else:
+                print(f"  ⚠️ WARNING: Model save failed!")
         else:
             patience_counter += 1
             print(f"  No improvement. Patience: {patience_counter}/{PATIENCE}")
         
         # ============ EARLY STOPPING ============
         if patience_counter >= PATIENCE:
-            print(f"\n⚠ Early stopping triggered at epoch {epoch+1}")
+            print(f"\n⚠️ Early stopping triggered at epoch {epoch+1}")
             break
         
         scheduler.step()
@@ -288,7 +296,7 @@ for seed in SEEDS:
     results[seed] = best_acc
 
 # ============================================================
-# SUMMARY
+# TRAINING SUMMARY
 # ============================================================
 print("\n" + "="*70)
 print("TRAINING SUMMARY")
@@ -303,5 +311,97 @@ print(f"Paper's ICM accuracy: 63.69%")
 improvement = (avg_acc - 0.6369) * 100
 print(f"Your improvement: {improvement:+.2f}%")
 
+# ============================================================
+# QUICK CONFUSION MATRIX CHECK
+# ============================================================
+print("\n" + "="*70)
+print("CONFUSION MATRIX VALIDATION")
+print("="*70)
+
+# Load all models
+models = []
+for seed in SEEDS:
+    model = SwinEmbryoClassifier().to(device)
+    model_path = f"{MODEL_DIR}/ICM_silver_seed{seed}_best.pth"
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    models.append(model)
+    print(f"✓ Loaded seed {seed}")
+
+# Get ensemble predictions
+val_dataset = EmbryoDataset(val_df, IMG_FOLDER, val_transform)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+all_preds, all_labels = [], []
+with torch.no_grad():
+    for images, labels in val_loader:
+        images = images.to(device)
+        outputs = torch.stack([m(images) for m in models]).mean(dim=0)
+        _, preds = torch.max(outputs, 1)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+# Confusion matrix
+cm = confusion_matrix(all_labels, all_preds)
+print("\nConfusion Matrix:")
+print("                 Predicted")
+print("                 Poor  Good")
+print(f"Actual Poor     {cm[0,0]:4d}  {cm[0,1]:4d}")
+print(f"       Good     {cm[1,0]:4d}  {cm[1,1]:4d}")
+
+poor_recall = cm[0,0]/(cm[0,0]+cm[0,1]) if (cm[0,0]+cm[0,1]) > 0 else 0
+good_recall = cm[1,1]/(cm[1,0]+cm[1,1]) if (cm[1,0]+cm[1,1]) > 0 else 0
+
+print(f"\nPer-Class Recall:")
+print(f"  Poor (ICM < 2): {poor_recall*100:.1f}%")
+print(f"  Good (ICM >= 2): {good_recall*100:.1f}%")
+
+if good_recall > 0.80 and poor_recall > 0.80:
+    print("\n✅ VALIDATION PASSED! Both classes learned well!")
+    print("   ICM results are REAL and VALID!")
+else:
+    print(f"\n⚠️ WARNING: Check for class bias")
+    if good_recall < 0.50:
+        print("   Poor performance on Good class (minority)")
+
+# ============================================================
+# ARCHIVE MODELS FOR DOWNLOAD
+# ============================================================
+print("\n" + "="*70)
+print("ARCHIVING MODELS FOR DOWNLOAD")
+print("="*70)
+
+if os.path.exists(MODEL_DIR):
+    # List files
+    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('.pth')]
+    print(f"\nFound {len(model_files)} model files:")
+    total_size = 0
+    for f in model_files:
+        size = os.path.getsize(os.path.join(MODEL_DIR, f)) / (1024*1024)
+        total_size += size
+        print(f"  - {f} ({size:.1f} MB)")
+    
+    print(f"\nTotal size: {total_size:.1f} MB")
+    
+    # Create zip archive
+    print("\nCreating archive...")
+    shutil.make_archive('ICM_models_all_seeds', 'zip', MODEL_DIR)
+    
+    zip_size = os.path.getsize('ICM_models_all_seeds.zip') / (1024*1024)
+    print(f"✅ Created: ICM_models_all_seeds.zip ({zip_size:.1f} MB)")
+    
+    print("\n" + "="*70)
+    print("📥 TO DOWNLOAD YOUR MODELS:")
+    print("="*70)
+    print("1. Click 'Save Version' in Kaggle (top right)")
+    print("2. Wait for notebook to finish running")
+    print("3. Go to 'Output' tab")
+    print("4. Download 'ICM_models_all_seeds.zip'")
+    print("5. Your models are now permanently saved!")
+    print("="*70)
+else:
+    print(f"❌ Model directory not found: {MODEL_DIR}")
+
 print(f"\n✅ All models saved in: {MODEL_DIR}/")
-print(f"✅ Ready for evaluation!")
+print(f"✅ Archive created: ICM_models_all_seeds.zip")
+print(f"✅ Ready for evaluation and thesis!")
