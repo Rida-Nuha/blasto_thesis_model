@@ -1,6 +1,6 @@
 """
 ICM TEST SET EVALUATION
-Evaluate ICM model on completely unseen test data
+Final test on Gardner_test_gold.xlsx
 """
 
 import torch
@@ -12,8 +12,7 @@ from PIL import Image
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
-    accuracy_score, precision_recall_fscore_support, 
-    confusion_matrix, classification_report, roc_auc_score
+    accuracy_score, confusion_matrix, classification_report, roc_auc_score
 )
 from tqdm import tqdm
 import os
@@ -21,7 +20,7 @@ import os
 # ============================================================
 # CONFIGURATION
 # ============================================================
-TEST_CSV = "/kaggle/input/dataset/Gardner_test_gold.csv"
+TEST_EXCEL = "/kaggle/input/dataset/Gardner_test_gold.xlsx"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 MODEL_DIR = "saved_models/uncertainty_ICM"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -86,8 +85,9 @@ print("\n" + "="*70)
 print("LOADING TEST DATA")
 print("="*70)
 
-test_df = pd.read_csv(TEST_CSV, sep=';')
-print(f"✓ Loaded test file: {len(test_df)} total samples")
+test_df = pd.read_excel(TEST_EXCEL)
+print(f"✓ Loaded Excel file: {len(test_df)} total samples")
+print(f"\nColumns: {test_df.columns.tolist()}")
 
 # Filter valid ICM_gold values
 test_df_clean = test_df[test_df['ICM_gold'].notna()].copy()
@@ -102,12 +102,14 @@ print(f"\nValid ICM samples: {len(test_df_clean)}")
 print(f"\nICM_gold distribution:")
 print(test_df_clean['ICM_gold'].value_counts().sort_index())
 
-# Binary conversion (same as training)
+# Binary conversion (same as training: ICM >= 2 is Good)
 test_df_clean['label'] = test_df_clean['ICM_gold'].apply(lambda x: 1 if x >= 2 else 0)
 
 print(f"\nBinary label distribution:")
-print(f"  Poor (ICM < 2): {(test_df_clean['label']==0).sum()} ({(test_df_clean['label']==0).sum()/len(test_df_clean)*100:.1f}%)")
-print(f"  Good (ICM >= 2): {(test_df_clean['label']==1).sum()} ({(test_df_clean['label']==1).sum()/len(test_df_clean)*100:.1f}%)")
+poor_count = (test_df_clean['label']==0).sum()
+good_count = (test_df_clean['label']==1).sum()
+print(f"  Poor (ICM < 2): {poor_count} ({poor_count/len(test_df_clean)*100:.1f}%)")
+print(f"  Good (ICM >= 2): {good_count} ({good_count/len(test_df_clean)*100:.1f}%)")
 
 # ============================================================
 # TEST TRANSFORMS
@@ -173,7 +175,7 @@ with torch.no_grad():
         _, preds = torch.max(avg_outputs, 1)
         
         all_predictions.extend(preds.cpu().numpy())
-        all_probabilities.extend(probs[:, 1].cpu().numpy())  # Probability of "Good" class
+        all_probabilities.extend(probs[:, 1].cpu().numpy())
         all_labels.extend(labels.numpy())
 
 test_preds = np.array(all_predictions)
@@ -209,11 +211,15 @@ print(f"\nPer-Class Metrics:")
 print(f"  Poor (ICM < 2):")
 print(f"    Recall:    {poor_recall*100:.2f}%")
 print(f"    Precision: {poor_precision*100:.2f}%")
-print(f"    F1-Score:  {2*poor_precision*poor_recall/(poor_precision+poor_recall)*100:.2f}%")
+if (poor_precision + poor_recall) > 0:
+    poor_f1 = 2*poor_precision*poor_recall/(poor_precision+poor_recall)
+    print(f"    F1-Score:  {poor_f1*100:.2f}%")
 print(f"  Good (ICM >= 2):")
 print(f"    Recall:    {good_recall*100:.2f}%")
 print(f"    Precision: {good_precision*100:.2f}%")
-print(f"    F1-Score:  {2*good_precision*good_recall/(good_precision+good_recall)*100:.2f}%")
+if (good_precision + good_recall) > 0:
+    good_f1 = 2*good_precision*good_recall/(good_precision+good_recall)
+    print(f"    F1-Score:  {good_f1*100:.2f}%")
 
 # Classification report
 print(f"\n{'Detailed Classification Report':^70}")
@@ -249,7 +255,6 @@ print("\n" + "="*70)
 print("VALIDATION CHECK")
 print("="*70)
 
-# Check if both classes are predicted
 unique_preds = np.unique(test_preds)
 print(f"\nUnique predictions: {unique_preds}")
 if len(unique_preds) == 2:
@@ -257,13 +262,11 @@ if len(unique_preds) == 2:
 else:
     print("⚠️ Model only predicts one class!")
 
-# Check against baseline
 baseline_acc = max(np.bincount(test_labels))/len(test_labels)*100
 print(f"\nBaseline (majority class): {baseline_acc:.2f}%")
 print(f"Your model:                {test_acc*100:.2f}%")
 print(f"Improvement over baseline: {(test_acc*100) - baseline_acc:+.2f}%")
 
-# Overall assessment
 print("\n" + "="*70)
 if good_recall > 0.80 and poor_recall > 0.80 and test_acc > 0.90:
     print("🎉 EXCEPTIONAL TEST PERFORMANCE!")
@@ -279,40 +282,5 @@ else:
     if good_recall < 0.50 or poor_recall < 0.50:
         print("   ⚠️ One class has low recall - check for bias")
 print("="*70)
-
-# ============================================================
-# SAVE RESULTS
-# ============================================================
-print("\n" + "="*70)
-print("SAVING TEST RESULTS")
-print("="*70)
-
-# Save predictions
-results_df = test_df_clean.copy()
-results_df['predicted_label'] = test_preds
-results_df['probability_good'] = test_probs
-results_df['correct'] = (test_preds == test_labels).astype(int)
-
-output_file = 'ICM_test_results.csv'
-results_df.to_csv(output_file, index=False)
-print(f"\n✓ Test predictions saved to: {output_file}")
-
-# Save metrics summary
-with open('ICM_test_metrics.txt', 'w') as f:
-    f.write("="*70 + "\n")
-    f.write("ICM TEST SET RESULTS\n")
-    f.write("="*70 + "\n\n")
-    f.write(f"Test Accuracy: {test_acc*100:.2f}%\n\n")
-    f.write("Confusion Matrix:\n")
-    f.write(f"  Poor predicted: {cm[0,0]} correct, {cm[0,1]} wrong\n")
-    f.write(f"  Good predicted: {cm[1,1]} correct, {cm[1,0]} wrong\n\n")
-    f.write(f"Poor Recall: {poor_recall*100:.2f}%\n")
-    f.write(f"Good Recall: {good_recall*100:.2f}%\n")
-    f.write(f"ROC-AUC: {auc:.4f}\n\n")
-    f.write(f"Paper ICM: {paper_icm:.2f}%\n")
-    f.write(f"Your ICM:  {test_acc*100:.2f}%\n")
-    f.write(f"Improvement: {improvement:+.2f}%\n")
-
-print(f"✓ Metrics summary saved to: ICM_test_metrics.txt")
 
 print("\n✅ TEST EVALUATION COMPLETE!")
