@@ -1,6 +1,7 @@
 """
 Swin Transformer with MC Dropout for Uncertainty Estimation
 Novel contribution: Hybrid uncertainty quantification for embryo quality prediction
+KAGGLE VERSION - All paths fixed
 """
 
 import torch
@@ -17,16 +18,16 @@ import os
 import random
 import numpy as np
 
-
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION - KAGGLE PATHS FIXED
 # ============================================================
 TARGET_SCORE = "EXP_silver"  # Options: "EXP_silver", "ICM_silver", "TE_silver"
 
-TRAIN_CSV = "data/Gardner_train_silver.csv"
-IMG_FOLDER = "data/images"
-SAVE_DIR = "saved_models/uncertainty"
-METRICS_FILE = f"training_metrics_{TARGET_SCORE}_uncertainty.csv"
+# ✅ KAGGLE CORRECT PATHS
+TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"  # ← FIXED
+IMG_FOLDER = "/kaggle/input/dataset/Images/Images"           # ← FIXED
+SAVE_DIR = "/kaggle/working/saved_models/uncertainty"        # ← FIXED
+METRICS_FILE = f"/kaggle/working/training_metrics_{TARGET_SCORE}_uncertainty.csv"
 
 BINARY_THRESHOLD = 2  # Good >= threshold
 
@@ -45,28 +46,41 @@ SEEDS = [42, 123, 456, 789, 2024]
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Create save directory
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ============================================================
-# DATASET
+# DATASET - KAGGLE READY
 # ============================================================
 class GardnerDataset(Dataset):
     def __init__(self, csv_file, img_folder, target_column, threshold=2, transform=None):
+        print(f"Loading {csv_file}...")
         self.df = pd.read_csv(csv_file, sep=';')
         self.img_folder = img_folder
         self.target_column = target_column
         self.threshold = threshold
         self.transform = transform
         
+        # Filter valid samples and create binary labels
+        valid_mask = (
+            self.df[target_column].notna() & 
+            (self.df[target_column] != 'ND') & 
+            (self.df[target_column] != 'NA')
+        )
+        self.df = self.df[valid_mask].copy()
+        self.df[target_column] = pd.to_numeric(self.df[target_column], errors='coerce')
+        self.df = self.df[self.df[target_column].notna()].copy()
+        
         self.df['binary_label'] = (self.df[target_column] >= threshold).astype(int)
         
         print(f"\n{'='*60}")
         print(f"Dataset for {target_column}")
         print(f"{'='*60}")
-        print(f"Total samples: {len(self.df)}")
+        print(f"Total samples (after filtering): {len(self.df)}")
         print(f"\nBinary distribution (threshold={threshold}):")
-        print(f"  Poor (0): {(self.df['binary_label'] == 0).sum()} samples")
-        print(f"  Good (1): {(self.df['binary_label'] == 1).sum()} samples")
-        print(f"  Imbalance ratio: {(self.df['binary_label'] == 0).sum() / (self.df['binary_label'] == 1).sum():.2f}:1")
+        print(f"  Poor (0): {(self.df['binary_label'] == 0).sum()} samples ({(self.df['binary_label'] == 0).mean()*100:.1f}%)")
+        print(f"  Good (1): {(self.df['binary_label'] == 1).sum()} samples ({(self.df['binary_label'] == 1).mean()*100:.1f}%)")
+        print(f"  Imbalance ratio: {((self.df['binary_label'] == 0).sum() / max((self.df['binary_label'] == 1).sum(), 1)):.2f}:1")
         print(f"{'='*60}\n")
     
     def __len__(self):
@@ -76,6 +90,9 @@ class GardnerDataset(Dataset):
         row = self.df.iloc[idx]
         
         img_path = os.path.join(self.img_folder, row['Image'])
+        if not os.path.exists(img_path):
+            raise FileNotFoundError(f"Image not found: {img_path}")
+            
         image = Image.open(img_path).convert('RGB')
         
         if self.transform:
@@ -91,14 +108,14 @@ class GardnerDataset(Dataset):
         weights = total / (len(counts) * counts)
         return torch.FloatTensor(weights)
 
-
 # Transforms
 train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((256, 256)),
+    transforms.RandomCrop(224),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomVerticalFlip(p=0.5),
     transforms.RandomRotation(20),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -108,7 +125,6 @@ val_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
-
 
 # ============================================================
 # MODEL WITH MC DROPOUT
@@ -122,17 +138,17 @@ class SwinWithUncertainty(nn.Module):
         self.backbone = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
         in_features = self.backbone.head.in_features
         
-        # Head with MC Dropout
+        # Replace head with MC Dropout layers
         self.backbone.head = nn.Sequential(
             nn.BatchNorm1d(in_features),
             nn.Dropout(p=dropout_rate),
             nn.Linear(in_features, 512),
             nn.GELU(),
             nn.BatchNorm1d(512),
-            nn.Dropout(p=dropout_rate),  # Keep dropout active
+            nn.Dropout(p=dropout_rate),
             nn.Linear(512, 256),
             nn.GELU(),
-            nn.Dropout(p=dropout_rate),  # Keep dropout active
+            nn.Dropout(p=dropout_rate),
             nn.Linear(256, num_classes)
         )
     
@@ -146,15 +162,9 @@ class SwinWithUncertainty(nn.Module):
                 module.train()
     
     def mc_predict(self, x, n_samples=20):
-        """Monte Carlo prediction with uncertainty
-        
-        Returns:
-            mean_pred: Average prediction
-            uncertainty: Predictive entropy
-            variance: Variance across samples
-        """
+        """Monte Carlo prediction with uncertainty"""
         self.eval()
-        self.enable_dropout()  # Keep dropout on
+        self.enable_dropout()
         
         predictions = []
         with torch.no_grad():
@@ -163,19 +173,12 @@ class SwinWithUncertainty(nn.Module):
                 probs = torch.softmax(logits, dim=1)
                 predictions.append(probs)
         
-        predictions = torch.stack(predictions)  # [n_samples, batch, n_classes]
-        
-        # Mean prediction
+        predictions = torch.stack(predictions)
         mean_pred = predictions.mean(dim=0)
-        
-        # Predictive entropy (uncertainty)
         entropy = -torch.sum(mean_pred * torch.log(mean_pred + 1e-10), dim=1)
-        
-        # Variance (epistemic uncertainty)
         variance = predictions.var(dim=0).mean(dim=1)
         
         return mean_pred, entropy, variance
-
 
 # ============================================================
 # FOCAL LOSS
@@ -192,34 +195,6 @@ class FocalLoss(nn.Module):
         focal_loss = ((1 - pt) ** self.gamma * ce_loss).mean()
         return focal_loss
 
-
-# ============================================================
-# TEMPERATURE SCALING (for calibration)
-# ============================================================
-class TemperatureScaling(nn.Module):
-    """Learn temperature parameter for probability calibration"""
-    
-    def __init__(self):
-        super().__init__()
-        self.temperature = nn.Parameter(torch.ones(1))
-    
-    def forward(self, logits):
-        return logits / self.temperature
-    
-    def fit(self, logits, labels, lr=0.01, max_iter=50):
-        """Fit temperature on validation set"""
-        optimizer = optim.LBFGS([self.temperature], lr=lr, max_iter=max_iter)
-        
-        def eval_loss():
-            optimizer.zero_grad()
-            loss = F.cross_entropy(self.forward(logits), labels)
-            loss.backward()
-            return loss
-        
-        optimizer.step(eval_loss)
-        return self.temperature.item()
-
-
 # ============================================================
 # UTILS
 # ============================================================
@@ -228,7 +203,8 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -250,10 +226,9 @@ def train_epoch(model, loader, criterion, optimizer, device):
         correct += (preds == labels).sum().item()
         total += labels.size(0)
         
-        pbar.set_postfix({'loss': loss.item()})
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     return total_loss / total, 100 * correct / total
-
 
 def validate(model, loader, criterion, device):
     model.eval()
@@ -281,12 +256,11 @@ def validate(model, loader, criterion, device):
                     class_correct[c] += (preds[mask] == labels[mask]).sum().item()
                     class_total[c] += mask.sum().item()
             
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     per_class_acc = (class_correct / (class_total + 1e-10)) * 100
     
     return total_loss / total, 100 * correct / total, per_class_acc
-
 
 # ============================================================
 # TRAIN SINGLE MODEL
@@ -314,15 +288,13 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
     patience_counter = 0
     
     for epoch in range(EPOCHS):
-        print(f"Model {model_idx+1} - Epoch {epoch+1}/{EPOCHS}")
-        print("-" * 50)
-        
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, DEVICE)
         val_loss, val_acc, per_class = validate(model, val_loader, criterion, DEVICE)
         
-        print(f"Train: Loss={train_loss:.4f}, Acc={train_acc:.2f}%")
-        print(f"Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
-        print(f"Per-class: {per_class.numpy().round(1)}")
+        print(f"Epoch {epoch+1}/{EPOCHS}:")
+        print(f"  Train: Loss={train_loss:.4f}, Acc={train_acc:.2f}%")
+        print(f"  Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
+        print(f"  Per-class: Poor={per_class[0]:.1f}%, Good={per_class[1]:.1f}%")
         
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -346,7 +318,6 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
     
     return best_val_acc
 
-
 # ============================================================
 # MAIN
 # ============================================================
@@ -355,12 +326,19 @@ def main():
     print(f"TRAINING ENSEMBLE WITH UNCERTAINTY FOR {TARGET_SCORE}")
     print("="*70 + "\n")
     
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    print(f"Device: {DEVICE}")
+    print(f"CSV: {TRAIN_CSV}")
+    print(f"Images: {IMG_FOLDER}\n")
     
-    print(f"Device: {DEVICE}\n")
+    # Verify paths exist
+    if not os.path.exists(TRAIN_CSV):
+        raise FileNotFoundError(f"Training CSV not found: {TRAIN_CSV}")
+    if not os.path.exists(IMG_FOLDER):
+        raise FileNotFoundError(f"Images folder not found: {IMG_FOLDER}")
+    
+    print("✅ Paths verified!")
     
     # Load dataset
-    print("Loading dataset...")
     full_dataset = GardnerDataset(
         TRAIN_CSV, 
         IMG_FOLDER, 
@@ -388,7 +366,7 @@ def main():
     
     # Class weights
     class_weights = full_dataset.get_class_weights().to(DEVICE)
-    print(f"\nClass weights: {class_weights.cpu().numpy()}")
+    print(f"\nClass weights: Poor={class_weights[0]:.3f}, Good={class_weights[1]:.3f}")
     
     # Train ensemble
     results = []
@@ -404,10 +382,9 @@ def main():
     df = pd.DataFrame(results)
     print(df.to_string(index=False))
     print(f"\nAverage accuracy: {df['best_val_acc'].mean():.2f}%")
-    print(f"Expected ensemble: {df['best_val_acc'].mean() + 3:.2f}% - {df['best_val_acc'].mean() + 5:.2f}%")
-    print(f"\nModels saved in: {SAVE_DIR}")
-    print("\nNext: Run uncertainty_evaluation.py for uncertainty analysis!")
-
+    print(f"Expected ensemble test: {df['best_val_acc'].mean() + 3:.2f}% - {df['best_val_acc'].mean() + 5:.2f}%")
+    print(f"\n✅ Models saved in: {SAVE_DIR}")
+    print("\n🎉 EXP TRAINING COMPLETE! Ready for test evaluation.")
 
 if __name__ == "__main__":
     main()
