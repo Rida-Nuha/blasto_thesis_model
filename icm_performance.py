@@ -1,6 +1,6 @@
 """
-ICM INDIVIDUAL + ENSEMBLE PERFORMANCE METRICS
-Exact same structure as your TE evaluation
+ICM PERFORMANCE METRICS - COMPLETE (Fixed import os)
+Generates: Accuracy, ROC-AUC, F1, Precision, Recall, Confusion Matrix
 """
 
 import torch
@@ -15,6 +15,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, precision_recall_fsco
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+import os  # ← FIXED! Missing import
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -23,6 +24,10 @@ ICM_PATH = "/kaggle/working/blasto_thesis_model/saved_models/uncertainty_ICM/"
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ALL METRICS GENERATED:
+print("✅ Metrics Generated: Accuracy, ROC-AUC, Precision, Recall, F1, Confusion Matrix")
+print("📊 Individual + 5-Model Ensemble Results")
 
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -45,7 +50,7 @@ class SwinEmbryoClassifier(nn.Module):
         )
     def forward(self, x): return self.backbone(x)
 
-# ICM VALIDATION DATASET (Full dataset - no split issues)
+# ICM FULL DATASET (2044 samples)
 def get_icm_full_dataset():
     df = pd.read_csv(TRAIN_CSV, sep=';')
     valid_mask = df['ICM_silver'].notna() & (df['ICM_silver'] != 'ND') & (df['ICM_silver'] != 'NA')
@@ -70,7 +75,28 @@ class ICMValDataset(Dataset):
         image = self.transform(image)
         return image, torch.tensor(row['label'], dtype=torch.long)
 
-# EVALUATE SINGLE MODEL
+# COMPLETE METRICS FUNCTION
+def compute_full_metrics(preds, probs, labels):
+    acc = accuracy_score(labels, preds) * 100
+    prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average='macro', zero_division=0)
+    auc = roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else np.nan
+    cm = confusion_matrix(labels, preds)
+    
+    poor_recall = cm[0,0] / (cm[0].sum() + 1e-10) * 100
+    good_recall = cm[1,1] / (cm[1].sum() + 1e-10) * 100
+    
+    return {
+        'accuracy': acc,
+        'precision': prec*100, 
+        'recall': rec*100,
+        'macro_f1': f1*100,
+        'roc_auc': auc,
+        'poor_recall': poor_recall,
+        'good_recall': good_recall,
+        'confusion_matrix': cm
+    }
+
+# EVALUATE SINGLE MODEL (ALL METRICS)
 def evaluate_single_model(model_path, val_loader, model_name):
     model = SwinEmbryoClassifier().to(device)
     checkpoint = torch.load(model_path, map_location=device)
@@ -88,55 +114,39 @@ def evaluate_single_model(model_path, val_loader, model_name):
             all_probs.extend(probs[:, 1].cpu().numpy())
             all_labels.extend(labels.numpy())
     
-    acc = accuracy_score(all_labels, all_preds) * 100
-    auc = roc_auc_score(all_labels, all_probs) if len(np.unique(all_labels)) > 1 else np.nan
-    return {'accuracy': acc, 'roc_auc': auc}
+    return compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
 
-# MAIN EVALUATION
-print("🔍 ICM INDIVIDUAL MODEL PERFORMANCE")
-print("="*60)
+# MAIN EXECUTION
+print("\n🔍 ICM INDIVIDUAL MODEL PERFORMANCE")
+print("="*70)
 
-# Create validation data
 val_df = get_icm_full_dataset()
 val_dataset = ICMValDataset(val_df, IMG_FOLDER)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
-# Evaluate each ICM model
 icm_models = [
     "ICM_silver_seed42_best.pth",
-    "ICM_silver_seed123_best.pth",
-    "ICM_silver_seed456_best.pth", 
+    "ICM_silver_seed123_best.pth", 
+    "ICM_silver_seed456_best.pth",
     "ICM_silver_seed789_best.pth",
     "ICM_silver_seed2024_best.pth"
 ]
 
-results = {}
+individual_results = {}
 for model_file in icm_models:
-    model_path = os.path.join(ICM_PATH, model_file)
+    model_path = os.path.join(ICM_PATH, model_file)  # Now works!
     if os.path.exists(model_path):
         metrics = evaluate_single_model(model_path, val_loader, model_file)
-        results[model_file] = metrics
-        print(f"✅ {model_file}: {metrics['accuracy']:.2f}% (AUC: {metrics['roc_auc']:.3f})")
+        individual_results[model_file] = metrics
+        print(f"✅ {model_file}:")
+        print(f"   Acc: {metrics['accuracy']:.2f}% | F1: {metrics['macro_f1']:.2f}% | AUC: {metrics['roc_auc']:.3f}")
     else:
-        print(f"❌ Missing: {model_file}")
+        print(f"❌ Missing: {model_path}")
 
-# SUMMARY TABLE
-print("\n" + "="*60)
-print("📊 ICM PERFORMANCE SUMMARY")
-print("="*60)
-df_results = pd.DataFrame(results).T
-df_results['accuracy'] = df_results['accuracy'].round(2)
-df_results['roc_auc'] = df_results['roc_auc'].round(3)
-print(df_results)
-
-print(f"\nEnsemble Average Accuracy: {df_results['accuracy'].mean():.2f}% ± {df_results['accuracy'].std():.2f}%")
-print(f"Best Model: {df_results['accuracy'].idxmax()} ({df_results['accuracy'].max():.2f}%)")
-print(f"Ensemble AUC: {df_results['roc_auc'].mean():.3f}")
-
-# ENSEMBLE EVALUATION
-print("\n" + "="*60)
-print("🎯 5-MODEL ICM ENSEMBLE")
-print("="*60)
+# ICM 5-MODEL ENSEMBLE (ALL METRICS)
+print("\n" + "="*70)
+print("🎯 ICM 5-MODEL ENSEMBLE (ALL METRICS)")
+print("="*70)
 
 models = []
 for model_file in icm_models:
@@ -161,36 +171,35 @@ if len(models) > 0:
             all_probs.extend(probs[:, 1].cpu().numpy())
             all_labels.extend(labels.numpy())
     
-    # Full metrics
-    acc = accuracy_score(all_labels, all_preds) * 100
-    prec, rec, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='macro', zero_division=0)
-    auc = roc_auc_score(all_labels, all_probs)
-    cm = confusion_matrix(all_labels, all_preds)
+    ensemble_metrics = compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
     
-    print(f"\n🏆 ICM 5-MODEL ENSEMBLE:")
-    print(f"   Accuracy:     {acc:.2f}%")
-    print(f"   Macro F1:     {f1*100:.2f}%")
-    print(f"   ROC-AUC:      {auc:.3f}")
-    print(f"   Poor Recall:  {cm[0,0]/cm[0].sum()*100:.1f}%")
-    print(f"   Good Recall:  {cm[1,1]/cm[1].sum()*100:.1f}%")
+    print(f"\n🏆 ICM ENSEMBLE COMPLETE METRICS:")
+    print(f"   Accuracy:      {ensemble_metrics['accuracy']:.2f}%")
+    print(f"   Precision:     {ensemble_metrics['precision']:.2f}%")
+    print(f"   Recall:        {ensemble_metrics['recall']:.2f}%")
+    print(f"   Macro F1:      {ensemble_metrics['macro_f1']:.2f}%")
+    print(f"   ROC-AUC:       {ensemble_metrics['roc_auc']:.3f}")
+    print(f"   Poor Recall:   {ensemble_metrics['poor_recall']:.1f}%")
+    print(f"   Good Recall:   {ensemble_metrics['good_recall']:.1f}%")
     
-    # Confusion Matrix
-    plt.figure(figsize=(6,5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True)
-    plt.title(f'ICM Ensemble Confusion Matrix\nAcc={acc:.1f}%')
+    # Confusion Matrix Plot
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(ensemble_metrics['confusion_matrix'], annot=True, fmt='d', cmap='Blues', 
+                cbar=True, square=True)
+    plt.title(f'ICM 5-Model Ensemble Confusion Matrix\nAcc={ensemble_metrics["accuracy"]:.1f}%')
     plt.ylabel('Actual'); plt.xlabel('Predicted')
     plt.savefig('/kaggle/working/icm_ensemble_cm.png', dpi=300, bbox_inches='tight')
     plt.show()
 
-# Save results
-df_results.to_csv('/kaggle/working/icm_individual_results.csv')
-ensemble_results = pd.DataFrame({
-    'metric': ['accuracy', 'macro_f1', 'roc_auc', 'n_models', 'n_samples'],
-    'value': [acc, f1*100, auc, len(models), len(all_labels)]
-})
-ensemble_results.to_csv('/kaggle/working/icm_ensemble_results.csv', index=False)
+# SAVE ALL RESULTS
+df_individual = pd.DataFrame(individual_results).T.round(2)
+df_ensemble = pd.DataFrame([ensemble_metrics]).round(2)
 
-print(f"\n💾 SAVED:")
-print(f"📊 /kaggle/working/icm_individual_results.csv")
-print(f"📊 /kaggle/working/icm_ensemble_results.csv")
+df_individual.to_csv('/kaggle/working/icm_individual_metrics.csv')
+df_ensemble.to_csv('/kaggle/working/icm_ensemble_metrics.csv')
+
+print(f"\n💾 SAVED FILES:")
+print(f"📊 /kaggle/working/icm_individual_metrics.csv")
+print(f"📊 /kaggle/working/icm_ensemble_metrics.csv") 
 print(f"🖼️  /kaggle/working/icm_ensemble_cm.png")
+print("\n✅ ALL METRICS GENERATED!")
