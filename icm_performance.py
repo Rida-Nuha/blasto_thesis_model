@@ -1,6 +1,6 @@
 """
-ICM PERFORMANCE METRICS - FULLY FIXED
-✅ Correct paths ✓ Error handling ✓ All metrics
+ICM PERFORMANCE METRICS - PATH FIXED
+Your models are in fresh_clone directory!
 """
 
 import torch
@@ -19,34 +19,14 @@ import os
 import warnings
 warnings.filterwarnings('ignore')
 
-# FIXED PATHS - Find your actual ICM models first
-print("🔍 FINDING ICM MODEL PATHS...")
-possible_paths = [
-    "/kaggle/working/blasto_thesis_model/saved_models/uncertainty_ICM/",
-    "/kaggle/working/saved_models/uncertainty_ICM/",
-    "/kaggle/input/notebook7818469fd6/blasto_thesis_model/saved_models/uncertainty_ICM/"
-]
-
-ICM_PATH = None
-for path in possible_paths:
-    if os.path.exists(path):
-        ICM_PATH = path
-        print(f"✅ ICM PATH FOUND: {ICM_PATH}")
-        break
-
-if ICM_PATH is None:
-    print("❌ ICM PATHS NOT FOUND. Available .pth files:")
-    for root, dirs, files in os.walk("/kaggle/working"):
-        pth_files = [f for f in files if f.endswith('.pth') and 'ICM' in f.upper()]
-        if pth_files:
-            print(f"📁 {root}:")
-            for f in pth_files:
-                print(f"   {f}")
-    exit()
-
+# ✅ CORRECTED ICM PATH (from your output)
+ICM_PATH = "/kaggle/working/fresh_clone/saved_models/uncertainty_ICM/"
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"✅ ICM PATH: {ICM_PATH}")
+print(f"✅ Found 5 models: seed42,123,456,789,2024")
 
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -76,6 +56,7 @@ def get_icm_full_dataset():
     df['ICM_silver'] = pd.to_numeric(df['ICM_silver'], errors='coerce')
     df = df[df['ICM_silver'].notna()].copy()
     df['label'] = (df['ICM_silver'] >= 2).astype(int)
+    print(f"✅ ICM Dataset: {len(df)} samples | Poor:{df['label'].value_counts()[0]} Good:{df['label'].value_counts()[1]}")
     return df
 
 class ICMValDataset(Dataset):
@@ -94,124 +75,115 @@ class ICMValDataset(Dataset):
 def compute_full_metrics(preds, probs, labels):
     acc = accuracy_score(labels, preds) * 100
     prec, rec, f1, _ = precision_recall_fscore_support(labels, preds, average='macro', zero_division=0)
-    auc = roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else np.nan
+    auc = roc_auc_score(labels, probs)
     cm = confusion_matrix(labels, preds)
     poor_recall = cm[0,0] / (cm[0].sum() + 1e-10) * 100
     good_recall = cm[1,1] / (cm[1].sum() + 1e-10) * 100
     return {
-        'accuracy': acc, 'precision': prec*100, 'recall': rec*100, 'macro_f1': f1*100,
-        'roc_auc': auc, 'poor_recall': poor_recall, 'good_recall': good_recall, 'confusion_matrix': cm
+        'accuracy': acc, 'macro_f1': f1*100, 'roc_auc': auc,
+        'poor_recall': poor_recall, 'good_recall': good_recall, 'confusion_matrix': cm
     }
 
-# FIND ACTUAL ICM MODEL FILES
-print(f"\n📂 Scanning {ICM_PATH} for ICM models...")
-icm_files = [f for f in os.listdir(ICM_PATH) if f.endswith('.pth') and 'ICM' in f.upper()]
-print(f"Found {len(icm_files)} ICM models:")
-for f in sorted(icm_files):
-    print(f"  ✓ {f}")
+# ICM MODELS (EXACT FILENAMES FROM YOUR OUTPUT)
+icm_models = [
+    "ICM_silver_seed42_best.pth",
+    "ICM_silver_seed123_best.pth", 
+    "ICM_silver_seed456_best.pth",
+    "ICM_silver_seed789_best.pth",
+    "ICM_silver_seed2024_best.pth"
+]
 
-icm_models = [f for f in icm_files if any(seed in f for seed in ['42', '123', '456', '789', '2024'])]
-
-# MAIN EXECUTION
+# DATASET
 val_df = get_icm_full_dataset()
 val_dataset = ICMValDataset(val_df, IMG_FOLDER)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=0)
 
-print("\n🔍 ICM INDIVIDUAL MODEL PERFORMANCE")
-print("="*70)
+print("\n🔥 ICM INDIVIDUAL MODEL RESULTS")
+print("="*50)
 
 individual_results = {}
-for model_file in icm_models[:5]:  # Limit to 5 models
+for model_file in icm_models:
     model_path = os.path.join(ICM_PATH, model_file)
-    if os.path.exists(model_path):
-        print(f"\nEvaluating {model_file}...")
-        try:
-            model = SwinEmbryoClassifier().to(device)
-            checkpoint = torch.load(model_path, map_location=device)
-            model.load_state_dict(checkpoint, strict=False)
-            model.eval()
-            
-            all_preds, all_probs, all_labels = [], [], []
-            with torch.no_grad():
-                for images, labels in tqdm(val_loader, desc=f"Eval {model_file[:20]}"):
-                    images = images.to(device)
-                    outputs = model(images)
-                    probs = torch.softmax(outputs, dim=1)
-                    preds = torch.argmax(outputs, dim=1)
-                    all_preds.extend(preds.cpu().numpy())
-                    all_probs.extend(probs[:, 1].cpu().numpy())
-                    all_labels.extend(labels.numpy())
-            
-            metrics = compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
-            individual_results[model_file] = metrics
-            print(f"✅ {model_file}: Acc={metrics['accuracy']:.2f}% | F1={metrics['macro_f1']:.2f}% | AUC={metrics['roc_auc']:.3f}")
-        except Exception as e:
-            print(f"❌ Error with {model_file}: {e}")
-    else:
-        print(f"❌ Missing: {model_path}")
-
-# ICM ENSEMBLE (Safe handling)
-print("\n" + "="*70)
-print("🎯 ICM ENSEMBLE EVALUATION")
-print("="*70)
-
-models = []
-for model_file in icm_models[:5]:
-    model_path = os.path.join(ICM_PATH, model_file)
-    if os.path.exists(model_path):
-        try:
-            model = SwinEmbryoClassifier().to(device)
-            checkpoint = torch.load(model_path, map_location=device)
-            model.load_state_dict(checkpoint, strict=False)
-            model.eval()
-            models.append(model)
-            print(f"✓ Loaded {model_file}")
-        except:
-            continue
-
-if len(models) > 0:
-    print(f"\nEvaluating {len(models)}-model ensemble...")
+    print(f"Loading {model_file}...")
+    
+    model = SwinEmbryoClassifier().to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint, strict=False)
+    model.eval()
+    
     all_preds, all_probs, all_labels = [], [], []
     with torch.no_grad():
-        for images, labels in tqdm(val_loader, desc="ICM Ensemble"):
+        for images, labels in tqdm(val_loader, desc=f"{model_file[:25]}"):
             images = images.to(device)
-            batch_outputs = [model(images) for model in models]
-            avg_outputs = torch.stack(batch_outputs).mean(dim=0)
-            probs = torch.softmax(avg_outputs, dim=1)
-            preds = torch.argmax(avg_outputs, dim=1)
+            outputs = model(images)
+            probs = torch.softmax(outputs, dim=1)
+            preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_probs.extend(probs[:, 1].cpu().numpy())
             all_labels.extend(labels.numpy())
     
-    ensemble_metrics = compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
+    metrics = compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
+    individual_results[model_file] = metrics
     
-    print(f"\n🏆 ICM {len(models)}-MODEL ENSEMBLE:")
-    print(f"   Accuracy:      {ensemble_metrics['accuracy']:.2f}%")
-    print(f"   Macro F1:      {ensemble_metrics['macro_f1']:.2f}%")
-    print(f"   ROC-AUC:       {ensemble_metrics['roc_auc']:.3f}")
-    print(f"   Poor Recall:   {ensemble_metrics['poor_recall']:.1f}%")
-    print(f"   Good Recall:   {ensemble_metrics['good_recall']:.1f}%")
-    
-    # Plot
-    plt.figure(figsize=(8,6))
-    sns.heatmap(ensemble_metrics['confusion_matrix'], annot=True, fmt='d', cmap='Blues')
-    plt.title(f'ICM Ensemble (n={len(models)})\nAcc={ensemble_metrics["accuracy"]:.1f}%')
-    plt.ylabel('Actual'); plt.xlabel('Predicted')
-    plt.savefig('/kaggle/working/icm_ensemble_cm.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    # Save ensemble
-    df_ensemble = pd.DataFrame([ensemble_metrics]).round(2)
-    df_ensemble.to_csv('/kaggle/working/icm_ensemble_metrics.csv', index=False)
-else:
-    print("❌ No ICM models could be loaded for ensemble")
-    df_ensemble = pd.DataFrame()
+    print(f"✅ {model_file}: {metrics['accuracy']:.1f}% | F1:{metrics['macro_f1']:.1f}% | AUC:{metrics['roc_auc']:.3f}")
 
-# Save individual results
-if individual_results:
-    df_individual = pd.DataFrame(individual_results).T.round(2)
-    df_individual.to_csv('/kaggle/working/icm_individual_metrics.csv')
-    print(f"\n✅ SAVED:")
-    print(f"📊 /kaggle/working/icm_individual_metrics.csv ({len(individual_results)} models)")
-print(f"📊 /kaggle/working/icm_ensemble_metrics.csv")
-print(f"🖼️  /kaggle/working/icm_ensemble_cm.png")
+# 5-MODEL ENSEMBLE
+print("\n" + "="*60)
+print("🏆 ICM 5-MODEL ENSEMBLE")
+print("="*60)
+
+models = []
+for model_file in icm_models:
+    model_path = os.path.join(ICM_PATH, model_file)
+    model = SwinEmbryoClassifier().to(device)
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint, strict=False)
+    model.eval()
+    models.append(model)
+
+all_preds, all_probs, all_labels = [], [], []
+with torch.no_grad():
+    for images, labels in tqdm(val_loader, desc="ICM Ensemble"):
+        images = images.to(device)
+        batch_outputs = [model(images) for model in models]
+        avg_outputs = torch.stack(batch_outputs).mean(dim=0)
+        probs = torch.softmax(avg_outputs, dim=1)
+        preds = torch.argmax(avg_outputs, dim=1)
+        all_preds.extend(preds.cpu().numpy())
+        all_probs.extend(probs[:, 1].cpu().numpy())
+        all_labels.extend(labels.numpy())
+
+ensemble_metrics = compute_full_metrics(np.array(all_preds), np.array(all_probs), np.array(all_labels))
+
+print(f"\n🎯 FINAL ICM ENSEMBLE RESULTS:")
+print(f"   Accuracy:     {ensemble_metrics['accuracy']:.2f}%")
+print(f"   Macro F1:     {ensemble_metrics['macro_f1']:.2f}%")
+print(f"   ROC-AUC:      {ensemble_metrics['roc_auc']:.3f}")
+print(f"   Poor Recall:  {ensemble_metrics['poor_recall']:.1f}%")
+print(f"   Good Recall:  {ensemble_metrics['good_recall']:.1f}%")
+
+# PLOT + SAVE
+plt.figure(figsize=(10, 8))
+plt.subplot(2,2,1)
+sns.heatmap(ensemble_metrics['confusion_matrix'], annot=True, fmt='d', cmap='Blues')
+plt.title(f'ICM Ensemble (Acc={ensemble_metrics["accuracy"]:.1f}%)')
+
+plt.subplot(2,2,2)
+df_individual = pd.DataFrame(individual_results).T[['accuracy', 'macro_f1', 'roc_auc']].round(2)
+df_individual.plot(kind='bar', ax=plt.gca())
+plt.title('Individual Model Performance')
+plt.xticks(rotation=45)
+
+plt.tight_layout()
+plt.savefig('/kaggle/working/icm_complete_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# FINAL TABLES
+df_individual.to_csv('/kaggle/working/icm_individual_results.csv')
+pd.DataFrame([ensemble_metrics]).round(2).to_csv('/kaggle/working/icm_ensemble_results.csv', index=False)
+
+print(f"\n✅ SAVED FOR SPRINGER PAPER:")
+print(f"📊 /kaggle/working/icm_individual_results.csv")
+print(f"📊 /kaggle/working/icm_ensemble_results.csv") 
+print(f"🖼️  /kaggle/working/icm_complete_results.png")
+print(f"\n📋 Table 1 Row: | ICM | {ensemble_metrics['accuracy']:.1f}% | {ensemble_metrics['macro_f1']:.1f}% | {ensemble_metrics['poor_recall']:.1f}% | {ensemble_metrics['good_recall']:.1f}% | {ensemble_metrics['roc_auc']:.3f} |")
