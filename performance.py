@@ -1,7 +1,7 @@
 """
 Training/Validation Performance Metrics - ICM/TE/EXP Ensembles
 COMPLETE FIXED VERSION - Springer Table 1 + Figures
-NO TEST DATA REQUIRED
+LaTeX SYNTAX ERROR CORRECTED
 """
 
 import torch
@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore')
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 
-# FIXED: lowercase keys matching target_name.lower()
+# FIXED: lowercase keys matching target_key
 MODEL_DIRS = {
     'icm': "/kaggle/working/saved_models/uncertainty",
     'te':  "/kaggle/working/saved_models/uncertainty", 
@@ -193,7 +193,7 @@ def evaluate_ensemble(target_key, target_col):
     print(f"Val distribution:\n{val_dataset.df['label'].value_counts(normalize=True).round(3)}")
     
     # Load models - FIXED KEY MATCHING
-    model_dir = MODEL_DIRS[target_key]  # target_key is now lowercase 'icm', 'te', 'exp'
+    model_dir = MODEL_DIRS[target_key]
     models = []
     
     for seed in SEEDS:
@@ -202,7 +202,7 @@ def evaluate_ensemble(target_key, target_col):
             model = SwinEmbryoClassifier().to(device)
             model.load_state_dict(torch.load(model_path, map_location=device))
             model.eval()
-            models.append((seed, model))
+            models.append(model)
             print(f"✓ Loaded seed {seed}")
         else:
             print(f"⚠️ Missing: {model_path}")
@@ -214,7 +214,7 @@ def evaluate_ensemble(target_key, target_col):
     print(f"✓ Loaded {len(models)}/{len(SEEDS)} models")
     
     # Evaluate validation set
-    preds, probs, labels = evaluate_loader(val_loader, [m[1] for m in models], target_key)
+    preds, probs, labels = evaluate_loader(val_loader, models, target_key)
     metrics = compute_metrics(preds, probs, labels)
     
     # Print results
@@ -227,121 +227,4 @@ def evaluate_ensemble(target_key, target_col):
     
     return {
         'target': target_key.upper(),
-        **{k: v*100 if k in ['accuracy', 'macro_precision', 'macro_recall', 'macro_f1', 'poor_recall', 'good_recall'] else v 
-           for k, v in metrics.items()}
-    }
-
-# ============================================================
-# RUN EVALUATION - FIXED LOOP
-# ============================================================
-print("Starting ensemble evaluation...")
-results = {}
-
-# FIXED: Use lowercase keys matching MODEL_DIRS
-for target_col, target_key in zip(TARGETS, ['icm', 'te', 'exp']):
-    result = evaluate_ensemble(target_key, target_col)
-    if result:
-        results[result['target']] = result
-
-# ============================================================
-# SPRINGER TABLE 1
-# ============================================================
-print("\n" + "="*80)
-print("SPRINGER TABLE 1: 5-MODEL ENSEMBLE VALIDATION PERFORMANCE")
-print("="*80)
-
-df_results = pd.DataFrame(results).T
-display_cols = ['accuracy', 'macro_f1', 'poor_recall', 'good_recall', 'roc_auc']
-df_display = df_results[display_cols].round(2)
-
-print(df_display)
-df_display.to_csv('/kaggle/working/val_performance_table.csv')
-
-# ============================================================
-# FIGURE 1: CONFUSION MATRICES
-# ============================================================
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle('Figure 1: Validation Confusion Matrices (5-Model Ensemble)', fontsize=16, fontweight='bold')
-
-for i, target in enumerate(results.keys()):
-    cm = results[target]['confusion_matrix']
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[i], 
-                cbar=False, square=True, linewidths=2)
-    axes[i].set_title(f'{target}\nVal Acc={results[target]["accuracy"]:.1f}%', 
-                     fontweight='bold', fontsize=12)
-    axes[i].set_xlabel('Predicted')
-    axes[i].set_ylabel('Actual')
-
-plt.tight_layout()
-plt.savefig('/kaggle/working/val_confusion_matrices.png', dpi=300, bbox_inches='tight')
-plt.savefig('/kaggle/working/val_confusion_matrices.pdf', bbox_inches='tight')
-plt.show()
-
-# ============================================================
-# FIGURE 2: PERFORMANCE COMPARISON
-# ============================================================
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-targets = list(results.keys())
-x = np.arange(len(targets))
-
-# Accuracy & F1
-ax1.bar(x-0.2, [results[t]['accuracy'] for t in targets], 0.4, label='Accuracy', alpha=0.8, color='#FF6B6B')
-ax1.bar(x+0.2, [results[t]['macro_f1'] for t in targets], 0.4, label='Macro F1', alpha=0.8, color='#4ECDC4')
-ax1.set_ylabel('Score (%)')
-ax1.set_title('Validation Performance')
-ax1.set_xticks(x)
-ax1.set_xticklabels(targets)
-ax1.legend()
-ax1.set_ylim(0, 105)
-
-# Recall comparison
-ax2.bar(x-0.2, [results[t]['poor_recall'] for t in targets], 0.4, label='Poor Recall', alpha=0.8, color='#96CEB4')
-ax2.bar(x+0.2, [results[t]['good_recall'] for t in targets], 0.4, label='Good Recall', alpha=0.8, color='#FFEAA7')
-ax2.axhline(y=95, color='red', linestyle='--', label='Safety Threshold')
-ax2.set_ylabel('Recall (%)')
-ax2.set_title('Per-Class Recall')
-ax2.set_xticks(x)
-ax2.set_xticklabels(targets)
-ax2.legend()
-ax2.set_ylim(0, 105)
-
-plt.tight_layout()
-plt.savefig('/kaggle/working/val_performance_charts.png', dpi=300, bbox_inches='tight')
-plt.savefig('/kaggle/working/val_performance_charts.pdf', bbox_inches='tight')
-plt.show()
-
-# ============================================================
-# SPRINGER LATE X TABLE
-# ============================================================
-latex_table = r"""
-\begin{table}[htbp]
-\centering
-\caption{Validation Performance of 5-Model Swin Transformer Ensembles (n=""" + str(len(val_dataset)) + r""")}
-\label{tab:ensemble-performance}
-\begin{tabular}{lccccc}
-\hline
-Target & Accuracy & Macro F1 & Poor Recall & Good Recall & ROC-AUC \\
-\hline
-"""
-
-for target in results:
-    r = results[target]
-    latex_table += f"{target} & {r['accuracy']:.1f}\\textperthousand} & {r['macro_f1']:.1f}\\textperthousand} & {r['poor_recall']:.1f}\\textperthousand} & {r['good_recall']:.1f}\\textperthousand} & {r['roc_auc']:.3f} \\ \n"
-
-latex_table += r"""
-\hline
-\end{tabular}
-\end{table}
-"""
-
-with open('/kaggle/working/springer_table1.tex', 'w') as f:
-    f.write(latex_table)
-
-print("\n" + "="*80)
-print("✅ ALL FILES GENERATED FOR SPRINGER PAPER:")
-print("📊 Table:      /kaggle/working/val_performance_table.csv")
-print("🖼️  Confusion: /kaggle/working/val_confusion_matrices.png")
-print("🖼️  Charts:    /kaggle/working/val_performance_charts.png")
-print("📝 LaTeX:      /kaggle/working/springer_table1.tex")
-print("🎉 PERFORMANCE EVALUATION COMPLETE!")
+        **{k: v*100 if k in ['accuracy
