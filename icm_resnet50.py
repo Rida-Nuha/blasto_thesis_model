@@ -1,7 +1,7 @@
 """
 ICM (Inner Cell Mass) Quality Prediction with Uncertainty Quantification
 ResNet-50 + Deep Ensembles + MC Dropout
-STRICTLY IDENTICAL TO SWIN VERSION EXCEPT BACKBONE
+WITH REAL-TIME TRAIN / VAL ACCURACY LOGGING
 """
 
 import torch
@@ -22,29 +22,26 @@ import shutil
 warnings.filterwarnings("ignore")
 
 # ============================================================
-# CONFIGURATION (UNCHANGED)
+# CONFIGURATION
 # ============================================================
 TARGET_SCORE = "ICM_silver"
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 MODEL_DIR = "saved_models/uncertainty_ICM_resnet50"
-OUTPUT_DIR = "uncertainty_results_ICM"
 BATCH_SIZE = 32
 NUM_EPOCHS = 60
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 5e-4
 SEEDS = [42, 123, 456, 789, 2024]
 PATIENCE = 20
-MC_DROPOUT_SAMPLES = 50
 
 os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"✅ Using device: {device}")
 
 # ============================================================
-# DATASET (UNCHANGED)
+# DATASET
 # ============================================================
 class EmbryoDataset(Dataset):
     def __init__(self, df, img_folder, transform=None):
@@ -58,7 +55,6 @@ class EmbryoDataset(Dataset):
     def __getitem__(self, idx):
         img_name = self.df.loc[idx, "Image"]
         label = self.df.loc[idx, "label"]
-
         img_path = os.path.join(self.img_folder, img_name)
         image = Image.open(img_path).convert("RGB")
 
@@ -68,7 +64,7 @@ class EmbryoDataset(Dataset):
         return image, torch.tensor(label, dtype=torch.long)
 
 # ============================================================
-# LOAD DATA (UNCHANGED)
+# LOAD DATA
 # ============================================================
 df = pd.read_csv(TRAIN_CSV, sep=";")
 df["label"] = df[TARGET_SCORE].apply(lambda x: 1 if x >= 2 else 0)
@@ -77,16 +73,18 @@ train_df, val_df = train_test_split(
     df, test_size=0.15, random_state=42, stratify=df["label"]
 )
 
+# Class weights
 class_counts = train_df["label"].value_counts().sort_index().values
 class_weights = len(train_df) / (2 * class_counts)
 
 if min(class_counts) / max(class_counts) < 0.25:
     class_weights[class_counts.argmin()] *= 1.5
+    print("⚠️ High imbalance detected – boosting minority class")
 
 class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
 # ============================================================
-# TRANSFORMS (UNCHANGED)
+# TRANSFORMS
 # ============================================================
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -108,7 +106,7 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# MODEL — RESNET-50 (ONLY CHANGE)
+# MODEL — RESNET 50
 # ============================================================
 class ResNetEmbryoClassifier(nn.Module):
     def __init__(self, num_classes=2, dropout=0.4):
@@ -118,7 +116,6 @@ class ResNetEmbryoClassifier(nn.Module):
         in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity()
 
-        # IDENTICAL HEAD TO SWIN VERSION
         self.classifier = nn.Sequential(
             nn.BatchNorm1d(in_features),
             nn.Dropout(dropout),
@@ -136,7 +133,7 @@ class ResNetEmbryoClassifier(nn.Module):
         return self.classifier(self.backbone(x))
 
 # ============================================================
-# FOCAL LOSS (UNCHANGED)
+# FOCAL LOSS
 # ============================================================
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.5):
@@ -153,9 +150,13 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 # ============================================================
-# TRAINING FUNCTION (UNCHANGED)
+# TRAINING FUNCTION (WITH REAL-TIME OVERFITTING MONITORING)
 # ============================================================
 def train_model(seed):
+    print(f"\n{'='*70}")
+    print(f"TRAINING MODEL WITH SEED {seed}")
+    print(f"{'='*70}")
+
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -170,63 +171,109 @@ def train_model(seed):
     )
 
     model = ResNetEmbryoClassifier().to(device)
-    criterion = FocalLoss(alpha=class_weights)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+    criterion = FocalLoss(alpha=class_weights, gamma=2.5)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=NUM_EPOCHS
+    )
 
-    best_acc, patience_counter = 0, 0
+    best_acc = 0.0
+    patience_counter = 0
 
     for epoch in range(NUM_EPOCHS):
+
+        # ---------------- TRAIN ----------------
         model.train()
-        for x, y in tqdm(train_loader, desc=f"Seed {seed} Epoch {epoch+1}"):
+        train_loss, train_correct, train_total = 0.0, 0, 0
+
+        for x, y in tqdm(train_loader, desc=f"Seed {seed} Epoch {epoch+1} [Train]"):
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(x), y)
+            out = model(x)
+            loss = criterion(out, y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
+            train_loss += loss.item()
+            preds = out.argmax(1)
+            train_correct += (preds == y).sum().item()
+            train_total += y.size(0)
+
+        train_acc = 100.0 * train_correct / train_total
+        avg_train_loss = train_loss / len(train_loader)
+
+        # ---------------- VALIDATION ----------------
         model.eval()
-        preds, labels = [], []
+        val_loss, val_correct, val_total = 0.0, 0, 0
+
         with torch.no_grad():
             for x, y in val_loader:
-                x = x.to(device)
-                preds.extend(model(x).argmax(1).cpu().numpy())
-                labels.extend(y.numpy())
+                x, y = x.to(device), y.to(device)
+                out = model(x)
+                loss = criterion(out, y)
+                val_loss += loss.item()
+                preds = out.argmax(1)
+                val_correct += (preds == y).sum().item()
+                val_total += y.size(0)
 
-        acc = accuracy_score(labels, preds)
-        scheduler.step()
+        val_acc = 100.0 * val_correct / val_total
+        avg_val_loss = val_loss / len(val_loader)
 
-        if acc > best_acc:
-            best_acc = acc
+        # ---------------- LOGGING ----------------
+        print(
+            f"Epoch {epoch+1:02d}/{NUM_EPOCHS} | "
+            f"Train Loss: {avg_train_loss:.4f} | "
+            f"Train Acc: {train_acc:.2f}% | "
+            f"Val Loss: {avg_val_loss:.4f} | "
+            f"Val Acc: {val_acc:.2f}%"
+        )
+
+        # ---------------- CHECKPOINT ----------------
+        if val_acc > best_acc:
+            best_acc = val_acc
+            patience_counter = 0
             torch.save(
                 model.state_dict(),
                 f"{MODEL_DIR}/ICM_resnet50_seed{seed}_best.pth"
             )
-            patience_counter = 0
+            print(f"  ✅ Best model saved")
         else:
             patience_counter += 1
+            print(f"  ⏳ No improvement | Patience {patience_counter}/{PATIENCE}")
 
         if patience_counter >= PATIENCE:
+            print(f"\n⚠️ Early stopping at epoch {epoch+1}")
             break
 
+        scheduler.step()
+
+    print(f"\n✅ Best Validation Accuracy (Seed {seed}): {best_acc:.2f}%")
     return best_acc
 
 # ============================================================
-# TRAIN ENSEMBLE
+# TRAIN ALL SEEDS
 # ============================================================
-results = {seed: train_model(seed) for seed in SEEDS}
+results = {}
+for seed in SEEDS:
+    results[seed] = train_model(seed)
 
 # ============================================================
 # SUMMARY
 # ============================================================
-print("\nRESNET-50 ICM RESULTS")
-for s, a in results.items():
-    print(f"Seed {s}: {a*100:.2f}%")
+print("\n" + "="*70)
+print("FINAL ICM RESNET-50 RESULTS")
+print("="*70)
 
-print(f"Average Accuracy: {np.mean(list(results.values()))*100:.2f}%")
+for s, a in results.items():
+    print(f"Seed {s}: {a:.2f}%")
+
+print(f"\nAverage Accuracy: {np.mean(list(results.values())):.2f}%")
 
 # ============================================================
 # ARCHIVE MODELS
 # ============================================================
 shutil.make_archive("ICM_resnet50_models", "zip", MODEL_DIR)
-print("✅ Models archived: ICM_resnet50_models.zip")
+print("\n✅ Models archived: ICM_resnet50_models.zip")
