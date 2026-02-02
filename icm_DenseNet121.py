@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore")
 TARGET_SCORE = "ICM_silver"
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
-MODEL_DIR = "saved_models/uncertainty_ICM_densenet121"
+MODEL_DIR = "kaggle/output/saved_models/uncertainty_ICM_densenet121"
 BATCH_SIZE = 32
 NUM_EPOCHS = 60
 LEARNING_RATE = 1e-4
