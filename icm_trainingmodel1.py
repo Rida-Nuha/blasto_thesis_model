@@ -27,13 +27,13 @@ warnings.filterwarnings('ignore')
 TARGET_SCORE = "ICM_silver"
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
-MODEL_DIR = "saved_models/uncertainty_ICM"
+MODEL_DIR = "kaggle/working/saved_models/uncertainty_ICM"
 OUTPUT_DIR = "uncertainty_results_ICM"
 BATCH_SIZE = 32
 NUM_EPOCHS = 60
 LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 5e-4
-SEEDS = [42, 123, 456, 789, 2024]
+SEEDS = [42]
 PATIENCE = 20
 MC_DROPOUT_SAMPLES = 50
 
