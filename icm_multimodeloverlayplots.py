@@ -42,27 +42,27 @@ BATCH_SIZE = 32
 MODELS = {
     "Swin-T": {
         "type": "swin",
-        "ckpt": "/kaggle/working/saved_models/uncertainty_ICM/ICM_silver_seed42_best.pth",
+        "ckpt": "kaggle/working/saved_models/uncertainty_ICM/ICM_silver_seed42_best.pth",
         "input": 224
     },
     "ResNet-50": {
         "type": "resnet50",
-        "ckpt": "/kaggle/working/saved_models/uncertainty_ICM_resnet50/ICM_resnet50_seed42_best.pth",
+        "ckpt": "kaggle/working/saved_models/uncertainty_ICM_resnet50/ICM_resnet50_seed42_best.pth",
         "input": 224
     },
     "ResNet-18": {
         "type": "resnet18",
-        "ckpt": "/kaggle/working/saved_models/uncertainty_ICM_resnet18/ICM_resnet18_seed42_best.pth",
+        "ckpt": "kaggle/working/saved_models/uncertainty_ICM_resnet18/ICM_resnet18_seed42_best.pth",
         "input": 224
     },
     "DenseNet-121": {
         "type": "densenet121",
-        "ckpt": "/kaggle/working/saved_models/uncertainty_ICM_densenet121/ICM_densenet121_seed42_best.pth",
+        "ckpt": "kaggle/working/saved_models/uncertainty_ICM_densenet121/ICM_densenet121_seed42_best.pth",
         "input": 224
     },
     "Inception-V3": {
         "type": "inception",
-        "ckpt": "/kaggle/working/saved_models/uncertainty_ICM_inceptionv3/ICM_inceptionv3_seed42_best.pth",
+        "ckpt": "kaggle/working/saved_models/uncertainty_ICM_inceptionv3/ICM_inceptionv3_seed42_best.pth",
         "input": 299
     }
 }
