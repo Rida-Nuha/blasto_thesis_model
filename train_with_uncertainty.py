@@ -34,7 +34,7 @@ BINARY_THRESHOLD = 2  # Good >= threshold
 NUM_CLASSES = 2
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
-EPOCHS = 50
+EPOCHS = 1
 LR = 1e-4
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
@@ -42,7 +42,7 @@ NUM_WORKERS = 2
 PATIENCE = 15
 
 # Train multiple models for ensemble
-SEEDS = [42, 123, 456, 789, 2024]
+SEEDS = [42]
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
