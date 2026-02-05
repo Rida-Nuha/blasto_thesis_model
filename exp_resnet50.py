@@ -25,7 +25,7 @@ TARGET_SCORE = "EXP_silver"
 
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
-SAVE_DIR = "kaggle/working/saved_models/uncertainty"
+SAVE_DIR = "kaggle/working/saved_models/uncertainty/resnet50"
 
 BINARY_THRESHOLD = 2
 
