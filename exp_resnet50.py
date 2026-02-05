@@ -12,7 +12,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.models import resnet50, ResNet50_Weights
 from torchvision import transforms
 from PIL import Image
-from tqdm import tqdm
 import pandas as pd
 import os
 import random
@@ -21,18 +20,19 @@ import numpy as np
 # ============================================================
 # CONFIGURATION
 # ============================================================
+ARCH = "resnet50"          # <<< IMPORTANT (USED IN FILENAME)
 TARGET_SCORE = "EXP_silver"
 
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
-SAVE_DIR = "kaggle/working/saved_models/uncertainty/resnet50"
+SAVE_DIR = "/kaggle/working/saved_models/uncertainty"
 
 BINARY_THRESHOLD = 2
-
 NUM_CLASSES = 2
+
 DROPOUT_RATE = 0.3
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 50
 LR = 1e-4
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
@@ -51,35 +51,28 @@ class GardnerDataset(Dataset):
     def __init__(self, csv_file, img_folder, target_column, threshold=2, transform=None):
         self.df = pd.read_csv(csv_file, sep=';')
         self.img_folder = img_folder
-        self.target_column = target_column
-        self.threshold = threshold
         self.transform = transform
 
         valid = (
             self.df[target_column].notna() &
-            (self.df[target_column] != 'ND') &
-            (self.df[target_column] != 'NA')
+            (~self.df[target_column].isin(['ND', 'NA']))
         )
         self.df = self.df[valid].copy()
-        self.df[target_column] = pd.to_numeric(self.df[target_column], errors='coerce')
-        self.df = self.df[self.df[target_column].notna()].copy()
-        self.df['binary_label'] = (self.df[target_column] >= threshold).astype(int)
+        self.df[target_column] = pd.to_numeric(self.df[target_column])
+        self.df['label'] = (self.df[target_column] >= threshold).astype(int)
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        img_path = os.path.join(self.img_folder, row['Image'])
-        image = Image.open(img_path).convert('RGB')
-
+        img = Image.open(os.path.join(self.img_folder, row['Image'])).convert("RGB")
         if self.transform:
-            image = self.transform(image)
-
-        return image, row['binary_label']
+            img = self.transform(img)
+        return img, row['label']
 
     def get_class_weights(self):
-        counts = self.df['binary_label'].value_counts().sort_index().values
+        counts = self.df['label'].value_counts().sort_index().values
         total = len(self.df)
         return torch.FloatTensor(total / (len(counts) * counts))
 
@@ -106,11 +99,11 @@ val_transform = transforms.Compose([
 # ============================================================
 # RESNET-50 WITH MC DROPOUT
 # ============================================================
-class ResNetWithUncertainty(nn.Module):
+class ResNet50WithUncertainty(nn.Module):
     def __init__(self, num_classes=2, dropout_rate=0.3):
         super().__init__()
         self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
-        in_features = self.backbone.fc.in_features
+        in_features = self.backbone.fc.in_features  # 2048
 
         self.backbone.fc = nn.Sequential(
             nn.BatchNorm1d(in_features),
@@ -133,23 +126,6 @@ class ResNetWithUncertainty(nn.Module):
             if isinstance(m, nn.Dropout):
                 m.train()
 
-    def mc_predict(self, x, n_samples=20):
-        self.eval()
-        self.enable_dropout()
-
-        preds = []
-        with torch.no_grad():
-            for _ in range(n_samples):
-                probs = torch.softmax(self(x), dim=1)
-                preds.append(probs)
-
-        preds = torch.stack(preds)
-        mean_pred = preds.mean(dim=0)
-        entropy = -torch.sum(mean_pred * torch.log(mean_pred + 1e-10), dim=1)
-        variance = preds.var(dim=0).mean(dim=1)
-
-        return mean_pred, entropy, variance
-
 # ============================================================
 # FOCAL LOSS
 # ============================================================
@@ -159,27 +135,20 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, inputs, targets):
-        ce = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
+    def forward(self, logits, targets):
+        ce = F.cross_entropy(logits, targets, reduction='none', weight=self.alpha)
         pt = torch.exp(-ce)
         return ((1 - pt) ** self.gamma * ce).mean()
 
 # ============================================================
-# UTILS
+# TRAIN / VALIDATE
 # ============================================================
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
 def train_epoch(model, loader, criterion, optimizer):
     model.train()
-    total_loss, correct, total = 0, 0, 0
+    loss_sum, correct, total = 0, 0, 0
 
     for x, y in loader:
         x, y = x.to(DEVICE), y.to(DEVICE)
-
         optimizer.zero_grad()
         logits = model(x)
         loss = criterion(logits, y)
@@ -187,15 +156,15 @@ def train_epoch(model, loader, criterion, optimizer):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        total_loss += loss.item() * x.size(0)
+        loss_sum += loss.item() * x.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
 
-    return total_loss / total, 100 * correct / total
+    return loss_sum / total, 100 * correct / total
 
 def validate(model, loader, criterion):
     model.eval()
-    total_loss, correct, total = 0, 0, 0
+    loss_sum, correct, total = 0, 0, 0
     class_correct = torch.zeros(2)
     class_total = torch.zeros(2)
 
@@ -205,31 +174,30 @@ def validate(model, loader, criterion):
             logits = model(x)
             loss = criterion(logits, y)
 
-            total_loss += loss.item() * x.size(0)
+            loss_sum += loss.item() * x.size(0)
             preds = logits.argmax(1)
             correct += (preds == y).sum().item()
             total += y.size(0)
 
             for c in range(2):
                 mask = y == c
-                if mask.sum() > 0:
-                    class_correct[c] += (preds[mask] == y[mask]).sum().item()
-                    class_total[c] += mask.sum().item()
+                class_correct[c] += (preds[mask] == y[mask]).sum().item()
+                class_total[c] += mask.sum().item()
 
-    per_class = (class_correct / (class_total + 1e-10)) * 100
-    return total_loss / total, 100 * correct / total, per_class
+    per_class = 100 * class_correct / (class_total + 1e-10)
+    return loss_sum / total, 100 * correct / total, per_class
 
 # ============================================================
-# TRAIN SINGLE MODEL (PER-EPOCH LOGGING)
+# TRAIN SINGLE MODEL (FIXED FILENAME)
 # ============================================================
 def train_single_model(seed, model_idx, train_loader, val_loader, class_weights):
-    print(f"\n{'='*70}")
-    print(f"TRAINING MODEL {model_idx+1}/5 — SEED {seed}")
-    print(f"{'='*70}")
+    print(f"\nTraining ResNet-50 model {model_idx+1} — seed {seed}")
 
-    set_seed(seed)
-    model = ResNetWithUncertainty(NUM_CLASSES, DROPOUT_RATE).to(DEVICE)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
+    model = ResNet50WithUncertainty(NUM_CLASSES, DROPOUT_RATE).to(DEVICE)
     criterion = FocalLoss(alpha=class_weights)
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
@@ -241,18 +209,21 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
         val_loss, val_acc, per_class = validate(model, val_loader, criterion)
 
         print(f"Epoch {epoch+1}/{EPOCHS}")
-        print(f"  Train: Loss={tr_loss:.4f}, Acc={tr_acc:.2f}%")
-        print(f"  Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
+        print(f"  Train: {tr_loss:.4f}, {tr_acc:.2f}%")
+        print(f"  Val:   {val_loss:.4f}, {val_acc:.2f}%")
         print(f"  Per-class: Poor={per_class[0]:.1f}%, Good={per_class[1]:.1f}%")
 
         if val_acc > best_acc:
             best_acc = val_acc
             patience = 0
+
+            # ✅ FIXED, ARCH-SPECIFIC FILENAME
             torch.save(
                 model.state_dict(),
-                f"{SAVE_DIR}/{TARGET_SCORE}_seed{seed}_best.pth"
+                f"{SAVE_DIR}/{ARCH}_{TARGET_SCORE}_seed{seed}_best.pth"
             )
-            print("   🎯 New best — model saved")
+
+            print("   🎯 Saved best ResNet-50 model")
         else:
             patience += 1
             if patience >= PATIENCE:
@@ -267,9 +238,9 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
 # ============================================================
 def main():
     dataset = GardnerDataset(TRAIN_CSV, IMG_FOLDER, TARGET_SCORE)
-    train_size = int(TRAIN_SPLIT * len(dataset))
-    val_size = len(dataset) - train_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
+    train_len = int(TRAIN_SPLIT * len(dataset))
+    val_len = len(dataset) - train_len
+    train_ds, val_ds = random_split(dataset, [train_len, val_len])
 
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
@@ -279,12 +250,11 @@ def main():
 
     class_weights = dataset.get_class_weights().to(DEVICE)
 
-    results = []
+    accs = []
     for i, seed in enumerate(SEEDS):
-        acc = train_single_model(seed, i, train_loader, val_loader, class_weights)
-        results.append(acc)
+        accs.append(train_single_model(seed, i, train_loader, val_loader, class_weights))
 
-    print("\nAverage ensemble validation accuracy:", np.mean(results))
+    print("\nAverage ensemble validation accuracy:", np.mean(accs))
 
 if __name__ == "__main__":
     main()
