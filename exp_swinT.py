@@ -34,7 +34,7 @@ BINARY_THRESHOLD = 2  # Good >= threshold
 NUM_CLASSES = 2
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
-EPOCHS = 1
+EPOCHS = 50
 LR = 1e-4
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
