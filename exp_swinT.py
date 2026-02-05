@@ -26,7 +26,7 @@ TARGET_SCORE = "EXP_silver"  # Options: "EXP_silver", "ICM_silver", "TE_silver"
 # ✅ KAGGLE CORRECT PATHS
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"  # ← FIXED
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"           # ← FIXED
-SAVE_DIR = "/kaggle/working/saved_models/uncertainty"        # ← FIXED
+SAVE_DIR = "kaggle/working/saved_models/uncertainty"        # ← FIXED
 METRICS_FILE = f"/kaggle/working/training_metrics_{TARGET_SCORE}_uncertainty.csv"
 
 BINARY_THRESHOLD = 2  # Good >= threshold
