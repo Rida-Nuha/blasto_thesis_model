@@ -1,6 +1,6 @@
 """
 InceptionV3 with MC Dropout for Uncertainty Estimation
-Torchvision >=0.16 SAFE VERSION (aux_logits handled correctly)
+FULLY FIXED – Torchvision-safe
 """
 
 import torch
@@ -15,15 +15,13 @@ import pandas as pd
 import numpy as np
 import os, random
 
-# ============================================================
-# CONFIG
-# ============================================================
+# ================= CONFIG =================
 ARCH = "inceptionv3"
 TARGET_SCORE = "EXP_silver"
 
 TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
-SAVE_DIR = "kaggle/working/saved_models/uncertainty"
+SAVE_DIR = "/kaggle/working/saved_models/uncertainty"
 
 NUM_CLASSES = 2
 BINARY_THRESHOLD = 2
@@ -42,211 +40,165 @@ SEEDS = [42]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# ============================================================
-# DATASET
-# ============================================================
+# ================= DATASET =================
 class GardnerDataset(Dataset):
-    def __init__(self, csv_file, img_folder, target, transform=None):
-        df = pd.read_csv(csv_file, sep=';')
-        df = df[df[target].notna() & ~df[target].isin(['ND', 'NA'])]
+    def __init__(self, csv, img_dir, target, transform=None):
+        df = pd.read_csv(csv, sep=";")
+        df = df[df[target].notna() & ~df[target].isin(["ND", "NA"])]
         df[target] = pd.to_numeric(df[target])
         df["label"] = (df[target] >= BINARY_THRESHOLD).astype(int)
 
         self.df = df.reset_index(drop=True)
-        self.img_folder = img_folder
+        self.img_dir = img_dir
         self.transform = transform
 
-    def __len__(self):
-        return len(self.df)
+    def __len__(self): return len(self.df)
 
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        img = Image.open(os.path.join(self.img_folder, row["Image"])).convert("RGB")
-        if self.transform:
-            img = self.transform(img)
-        return img, row["label"]
+    def __getitem__(self, i):
+        r = self.df.iloc[i]
+        img = Image.open(os.path.join(self.img_dir, r["Image"])).convert("RGB")
+        if self.transform: img = self.transform(img)
+        return img, r["label"]
 
     def get_class_weights(self):
-        counts = self.df["label"].value_counts().sort_index().values
-        total = len(self.df)
-        return torch.FloatTensor(total / (len(counts) * counts))
+        c = self.df["label"].value_counts().sort_index().values
+        return torch.FloatTensor(len(self.df) / (2 * c))
 
-# ============================================================
-# TRANSFORMS (299x299 REQUIRED)
-# ============================================================
-train_transform = transforms.Compose([
-    transforms.Resize((342, 342)),
+# ================= TRANSFORMS =================
+train_tf = transforms.Compose([
+    transforms.Resize((342,342)),
     transforms.RandomCrop(299),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
     transforms.RandomRotation(20),
-    transforms.ColorJitter(0.2, 0.2, 0.2),
+    transforms.ColorJitter(0.2,0.2,0.2),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-val_transform = transforms.Compose([
-    transforms.Resize((299, 299)),
+val_tf = transforms.Compose([
+    transforms.Resize((299,299)),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-# ============================================================
-# INCEPTIONV3 WITH AUX LOGITS FIX (CRITICAL PART)
-# ============================================================
+# ================= MODEL =================
 class InceptionV3WithUncertainty(nn.Module):
-    def __init__(self, num_classes=2, dropout_rate=0.3):
+    def __init__(self):
         super().__init__()
 
-        # aux_logits MUST be True with pretrained weights
         self.backbone = inception_v3(
             weights=Inception_V3_Weights.IMAGENET1K_V1,
             aux_logits=True
         )
 
-        # Disable auxiliary classifier completely
         self.backbone.AuxLogits = None
-
-        in_features = self.backbone.fc.in_features  # 2048
+        f = self.backbone.fc.in_features
 
         self.backbone.fc = nn.Sequential(
-            nn.BatchNorm1d(in_features),
-            nn.Dropout(dropout_rate),
-            nn.Linear(in_features, 512),
+            nn.BatchNorm1d(f),
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(f, 512),
             nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(512, num_classes)
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(512, NUM_CLASSES)
         )
 
     def forward(self, x):
-        # Since AuxLogits is None, forward returns logits only
-        return self.backbone(x)
+        out = self.backbone(x)
 
-# ============================================================
-# LOSS
-# ============================================================
+        # 🔑 CRITICAL FIX
+        if hasattr(out, "logits"):
+            return out.logits
+
+        return out
+
+# ================= LOSS =================
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0):
+    def __init__(self, alpha=None, gamma=2):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, logits, targets):
-        ce = F.cross_entropy(logits, targets, reduction="none", weight=self.alpha)
+    def forward(self, x, y):
+        ce = F.cross_entropy(x, y, reduction="none", weight=self.alpha)
         pt = torch.exp(-ce)
         return ((1 - pt) ** self.gamma * ce).mean()
 
-# ============================================================
-# TRAIN / VALIDATE
-# ============================================================
-def train_epoch(model, loader, criterion, optimizer):
+# ================= TRAIN =================
+def train_epoch(model, loader, loss_fn, opt):
     model.train()
-    total_loss, correct, total = 0, 0, 0
+    loss_sum = correct = total = 0
 
-    for x, y in loader:
-        x, y = x.to(DEVICE), y.to(DEVICE)
-
-        optimizer.zero_grad()
+    for x,y in loader:
+        x,y = x.to(DEVICE), y.to(DEVICE)
+        opt.zero_grad()
         logits = model(x)
-        loss = criterion(logits, y)
+        loss = loss_fn(logits, y)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        opt.step()
 
-        total_loss += loss.item() * x.size(0)
+        loss_sum += loss.item() * y.size(0)
         correct += (logits.argmax(1) == y).sum().item()
         total += y.size(0)
 
-    return total_loss / total, 100 * correct / total
+    return loss_sum/total, 100*correct/total
 
-def validate(model, loader, criterion):
+def validate(model, loader, loss_fn):
     model.eval()
-    total_loss, correct, total = 0, 0, 0
+    loss_sum = correct = total = 0
 
     with torch.no_grad():
-        for x, y in loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
+        for x,y in loader:
+            x,y = x.to(DEVICE), y.to(DEVICE)
             logits = model(x)
-            loss = criterion(logits, y)
-
-            total_loss += loss.item() * x.size(0)
+            loss = loss_fn(logits, y)
+            loss_sum += loss.item() * y.size(0)
             correct += (logits.argmax(1) == y).sum().item()
             total += y.size(0)
 
-    return total_loss / total, 100 * correct / total
+    return loss_sum/total, 100*correct/total
 
-# ============================================================
-# TRAIN SINGLE MODEL
-# ============================================================
-def train_single_model(seed, train_loader, val_loader, class_weights):
-    print(f"\nTraining {ARCH} — seed {seed}")
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    model = InceptionV3WithUncertainty(NUM_CLASSES, DROPOUT_RATE).to(DEVICE)
-    criterion = FocalLoss(alpha=class_weights)
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-
-    best_acc = 0
-    patience = 0
-
-    for epoch in range(EPOCHS):
-        tr_loss, tr_acc = train_epoch(model, train_loader, criterion, optimizer)
-        val_loss, val_acc = validate(model, val_loader, criterion)
-
-        print(f"Epoch {epoch+1}/{EPOCHS}")
-        print(f"  Train: Loss={tr_loss:.4f}, Acc={tr_acc:.2f}%")
-        print(f"  Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
-
-        if val_acc > best_acc:
-            best_acc = val_acc
-            patience = 0
-            torch.save(
-                model.state_dict(),
-                f"{SAVE_DIR}/{ARCH}_{TARGET_SCORE}_seed{seed}_best.pth"
-            )
-            print("   🎯 Saved best model")
-        else:
-            patience += 1
-            if patience >= PATIENCE:
-                print("   🛑 Early stopping")
-                break
-        print()
-
-# ============================================================
-# MAIN
-# ============================================================
+# ================= MAIN =================
 def main():
-    dataset = GardnerDataset(TRAIN_CSV, IMG_FOLDER, TARGET_SCORE)
+    ds = GardnerDataset(TRAIN_CSV, IMG_FOLDER, TARGET_SCORE)
+    tr_len = int(TRAIN_SPLIT * len(ds))
+    tr, va = random_split(ds, [tr_len, len(ds)-tr_len])
 
-    train_len = int(TRAIN_SPLIT * len(dataset))
-    val_len = len(dataset) - train_len
-    train_ds, val_ds = random_split(dataset, [train_len, val_len])
+    tr.dataset.transform = train_tf
+    va.dataset.transform = val_tf
 
-    train_ds.dataset.transform = train_transform
-    val_ds.dataset.transform = val_transform
+    tr_loader = DataLoader(tr, BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    va_loader = DataLoader(va, BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
 
-    train_loader = DataLoader(
-        train_ds, BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds, BATCH_SIZE, shuffle=False,
-        num_workers=NUM_WORKERS, pin_memory=True
-    )
-
-    class_weights = dataset.get_class_weights().to(DEVICE)
+    weights = ds.get_class_weights().to(DEVICE)
 
     for seed in SEEDS:
-        train_single_model(seed, train_loader, val_loader, class_weights)
+        random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+        print(f"\nTraining {ARCH} — seed {seed}")
+
+        model = InceptionV3WithUncertainty().to(DEVICE)
+        opt = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+        loss_fn = FocalLoss(alpha=weights)
+
+        best, patience = 0, 0
+        for ep in range(EPOCHS):
+            tr_loss, tr_acc = train_epoch(model, tr_loader, loss_fn, opt)
+            va_loss, va_acc = validate(model, va_loader, loss_fn)
+
+            print(f"Epoch {ep+1}: Train {tr_acc:.2f}% | Val {va_acc:.2f}%")
+
+            if va_acc > best:
+                best = va_acc
+                patience = 0
+                torch.save(
+                    model.state_dict(),
+                    f"{SAVE_DIR}/{ARCH}_{TARGET_SCORE}_seed{seed}_best.pth"
+                )
+            else:
+                patience += 1
+                if patience >= PATIENCE:
+                    break
 
 if __name__ == "__main__":
     main()
