@@ -1,6 +1,6 @@
 """
 InceptionV3 with MC Dropout for Uncertainty Estimation
-Correct & stable implementation (Kaggle-ready)
+Torchvision >=0.16 SAFE VERSION (aux_logits handled correctly)
 """
 
 import torch
@@ -72,7 +72,7 @@ class GardnerDataset(Dataset):
         return torch.FloatTensor(total / (len(counts) * counts))
 
 # ============================================================
-# TRANSFORMS (INCEPTION REQUIRES 299×299)
+# TRANSFORMS (299x299 REQUIRED)
 # ============================================================
 train_transform = transforms.Compose([
     transforms.Resize((342, 342)),
@@ -98,16 +98,20 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# INCEPTIONV3 WITH MC DROPOUT (CORRECT)
+# INCEPTIONV3 WITH AUX LOGITS FIX (CRITICAL PART)
 # ============================================================
 class InceptionV3WithUncertainty(nn.Module):
     def __init__(self, num_classes=2, dropout_rate=0.3):
         super().__init__()
 
+        # aux_logits MUST be True with pretrained weights
         self.backbone = inception_v3(
             weights=Inception_V3_Weights.IMAGENET1K_V1,
-            aux_logits=False
+            aux_logits=True
         )
+
+        # Disable auxiliary classifier completely
+        self.backbone.AuxLogits = None
 
         in_features = self.backbone.fc.in_features  # 2048
 
@@ -121,12 +125,8 @@ class InceptionV3WithUncertainty(nn.Module):
         )
 
     def forward(self, x):
+        # Since AuxLogits is None, forward returns logits only
         return self.backbone(x)
-
-    def enable_dropout(self):
-        for m in self.modules():
-            if isinstance(m, nn.Dropout):
-                m.train()
 
 # ============================================================
 # LOSS
@@ -151,6 +151,7 @@ def train_epoch(model, loader, criterion, optimizer):
 
     for x, y in loader:
         x, y = x.to(DEVICE), y.to(DEVICE)
+
         optimizer.zero_grad()
         logits = model(x)
         loss = criterion(logits, y)
@@ -185,6 +186,7 @@ def validate(model, loader, criterion):
 # ============================================================
 def train_single_model(seed, train_loader, val_loader, class_weights):
     print(f"\nTraining {ARCH} — seed {seed}")
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -224,6 +226,7 @@ def train_single_model(seed, train_loader, val_loader, class_weights):
 # ============================================================
 def main():
     dataset = GardnerDataset(TRAIN_CSV, IMG_FOLDER, TARGET_SCORE)
+
     train_len = int(TRAIN_SPLIT * len(dataset))
     val_len = len(dataset) - train_len
     train_ds, val_ds = random_split(dataset, [train_len, val_len])
