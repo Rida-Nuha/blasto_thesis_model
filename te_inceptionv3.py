@@ -61,7 +61,7 @@ class EmbryoDataset(Dataset):
         return image, torch.tensor(label, dtype=torch.long)
 
 # ============================================================
-# MODEL — INCEPTIONV3
+# MODEL — INCEPTIONV3 (AUX OUTPUT SAFE)
 # ============================================================
 class InceptionV3EmbryoClassifier(nn.Module):
     def __init__(self, num_classes=2, dropout=0.4):
@@ -69,7 +69,7 @@ class InceptionV3EmbryoClassifier(nn.Module):
 
         self.backbone = inception_v3(
             weights=Inception_V3_Weights.IMAGENET1K_V1,
-            aux_logits=False
+            aux_logits=True
         )
 
         in_features = self.backbone.fc.in_features
@@ -89,7 +89,15 @@ class InceptionV3EmbryoClassifier(nn.Module):
         )
 
     def forward(self, x):
-        features = self.backbone(x)
+        outputs = self.backbone(x)
+
+        # Training → outputs is InceptionOutputs
+        if self.training:
+            features = outputs.logits
+        # Eval → outputs is Tensor
+        else:
+            features = outputs
+
         return self.classifier(features)
 
 # ============================================================
@@ -118,7 +126,7 @@ print("\nBinary label distribution:")
 print(te_df["label"].value_counts())
 
 # ============================================================
-# TRANSFORMS (299×299 FOR INCEPTION)
+# TRANSFORMS — INCEPTION REQUIRES 299×299
 # ============================================================
 train_transform = transforms.Compose([
     transforms.Resize((320, 320)),
