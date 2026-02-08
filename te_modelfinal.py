@@ -21,11 +21,11 @@ import os
 # ============================================================
 # CONFIGURATION - SAME AS ICM
 # ============================================================
-SEEDS = [42, 123, 456, 789, 2024]  # Train 5 models like ICM
+SEEDS = [42]  # Train 5 models like ICM
 CSV_FILE = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 TARGET = 'TE_silver'  # ← ONLY CHANGE FROM ICM CODE
-SAVE_DIR = "saved_models/uncertainty_TE"
+SAVE_DIR = "kaggle/working/saved_models/uncertainty_TE"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
