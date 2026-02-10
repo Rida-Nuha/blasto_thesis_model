@@ -19,7 +19,7 @@ SEEDS = [42]
 CSV_FILE = "/kaggle/input/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 TARGET = "TE_silver"
-SAVE_DIR = "kaggle/working/saved_models/uncertainty_TE"
+SAVE_DIR = "/kaggle/working/saved_models/uncertainty_TE"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -61,16 +61,20 @@ class EmbryoDataset(Dataset):
         return image, torch.tensor(label, dtype=torch.long)
 
 # ============================================================
-# MODEL — INCEPTIONV3 (AUX OUTPUT SAFE)
+# MODEL — FIXED INCEPTIONV3
 # ============================================================
 class InceptionV3EmbryoClassifier(nn.Module):
     def __init__(self, num_classes=2, dropout=0.4):
         super().__init__()
 
+        # Load pretrained InceptionV3
         self.backbone = inception_v3(
-            weights=Inception_V3_Weights.IMAGENET1K_V1,
-            aux_logits=True
+            weights=Inception_V3_Weights.IMAGENET1K_V1
         )
+
+        # 🔑 Disable auxiliary logits AFTER loading weights
+        self.backbone.aux_logits = False
+        self.backbone.AuxLogits = None
 
         in_features = self.backbone.fc.in_features
         self.backbone.fc = nn.Identity()
@@ -89,15 +93,7 @@ class InceptionV3EmbryoClassifier(nn.Module):
         )
 
     def forward(self, x):
-        outputs = self.backbone(x)
-
-        # Training → outputs is InceptionOutputs
-        if self.training:
-            features = outputs.logits
-        # Eval → outputs is Tensor
-        else:
-            features = outputs
-
+        features = self.backbone(x)
         return self.classifier(features)
 
 # ============================================================
@@ -126,7 +122,7 @@ print("\nBinary label distribution:")
 print(te_df["label"].value_counts())
 
 # ============================================================
-# TRANSFORMS — INCEPTION REQUIRES 299×299
+# TRANSFORMS (Inception requires 299x299)
 # ============================================================
 train_transform = transforms.Compose([
     transforms.Resize((320, 320)),
@@ -136,19 +132,23 @@ train_transform = transforms.Compose([
     transforms.RandomRotation(20),
     transforms.ColorJitter(0.2, 0.2, 0.2),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
+    transforms.Normalize(
+        [0.485, 0.456, 0.406],
+        [0.229, 0.224, 0.225]
+    )
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize((299, 299)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
+    transforms.Normalize(
+        [0.485, 0.456, 0.406],
+        [0.229, 0.224, 0.225]
+    )
 ])
 
 # ============================================================
-# TRAINING — 5 SEEDS
+# TRAINING
 # ============================================================
 all_results = []
 
@@ -178,15 +178,20 @@ for seed in SEEDS:
 
     class_counts = train_df["label"].value_counts().sort_index()
     total = len(train_df)
-    class_weights = torch.tensor([
-        total / (2 * class_counts[0]),
-        total / (2 * class_counts[1])
-    ], dtype=torch.float32).to(device)
+    class_weights = torch.tensor(
+        [
+            total / (2 * class_counts[0]),
+            total / (2 * class_counts[1])
+        ],
+        dtype=torch.float32
+    ).to(device)
 
     model = InceptionV3EmbryoClassifier().to(device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=1e-4, weight_decay=0.01
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=25, eta_min=1e-6
     )
@@ -197,7 +202,8 @@ for seed in SEEDS:
     for epoch in range(25):
         # ---------------- TRAIN ----------------
         model.train()
-        train_preds, train_labels, train_loss = [], [], 0.0
+        train_preds, train_labels = [], []
+        train_loss = 0.0
 
         for x, y in tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]"):
             x, y = x.to(device), y.to(device)
@@ -216,7 +222,8 @@ for seed in SEEDS:
 
         # ---------------- VALIDATION ----------------
         model.eval()
-        val_preds, val_labels, val_loss = [], [], 0.0
+        val_preds, val_labels = [], []
+        val_loss = 0.0
 
         with torch.no_grad():
             for x, y in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
@@ -258,11 +265,11 @@ for seed in SEEDS:
 # FINAL SUMMARY
 # ============================================================
 print("\n" + "="*70)
-print("FINAL TE INCEPTIONV3 ENSEMBLE RESULTS")
+print("FINAL TE INCEPTIONV3 RESULTS")
 print("="*70)
 print(f"Average Accuracy: {np.mean(all_results)*100:.2f}% ± {np.std(all_results)*100:.2f}%")
 print(f"Best Model: {max(all_results)*100:.2f}%")
 print(f"Worst Model: {min(all_results)*100:.2f}%")
 
-print("\n✅ TE INCEPTIONV3 TRAINING COMPLETE")
+print("\n✅ TRAINING COMPLETE")
 print(f"📁 Models saved to: {SAVE_DIR}")
