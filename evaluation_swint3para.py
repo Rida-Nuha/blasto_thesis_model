@@ -43,7 +43,7 @@ ICM_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
 TE_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
 
 # ============================================================
-# DATASET & MODEL (Re-declared to load properly)
+# DATASET (UPDATED FOR GOLD LABELS)
 # ============================================================
 class TestGardnerDataset(Dataset):
     def __init__(self, data_path, img_folder, transform=None):
@@ -56,7 +56,9 @@ class TestGardnerDataset(Dataset):
             
         self.img_folder = img_folder
         self.transform = transform
-        self.targets = ["EXP_silver", "ICM_silver", "TE_silver"]
+        
+        # 🚨 UPDATED TARGETS TO MATCH YOUR EXCEL FILE 🚨
+        self.targets = ["EXP_gold", "ICM_gold", "TE_gold"]
         
         for col in self.targets:
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
@@ -73,8 +75,9 @@ class TestGardnerDataset(Dataset):
         img_path = os.path.join(self.img_folder, row['Image'])
         image = Image.open(img_path).convert('RGB')
         if self.transform: image = self.transform(image)
-        return image, row["EXP_silver"], row["ICM_silver"], row["TE_silver"]
-
+        
+        # 🚨 UPDATED RETURN STATEMENT TO MATCH YOUR EXCEL FILE 🚨
+        return image, row["EXP_gold"], row["ICM_gold"], row["TE_gold"]
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
