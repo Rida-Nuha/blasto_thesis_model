@@ -22,7 +22,7 @@ from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score
 # ============================================================
 # 🚨 UPDATE THIS PATH to your actual test dataset (CSV or Excel)
 TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xlsx"  
-IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
+IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 
 # This should point to the exact file saved in the previous step
 MODEL_PATH = "/kaggle/working/saved_models/multitask/multitask_seed42_best.pth" 
