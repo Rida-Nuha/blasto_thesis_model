@@ -286,9 +286,9 @@ def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
     
     # PyTorch's native stable loss function applied to all 3 tasks
     criteria = (
-        nn.CrossEntropyLoss(weight=w_exp.to(DEVICE)),
-        nn.CrossEntropyLoss(weight=w_icm.to(DEVICE)),
-        nn.CrossEntropyLoss(weight=w_te.to(DEVICE))
+        nn.CrossEntropyLoss(),
+        nn.CrossEntropyLoss(),
+        nn.CrossEntropyLoss()
     )
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
