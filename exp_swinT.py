@@ -33,7 +33,7 @@ NUM_CLASSES = 5  # Changed from 2 to 4 (labels 0, 1, 2, 3, 4)
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
 EPOCHS = 50
-LR = 2e-5
+LR = 1e-5
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
@@ -134,21 +134,19 @@ val_transform = transforms.Compose([
 # MODEL WITH MC DROPOUT
 # ============================================================
 class SwinWithUncertainty(nn.Module):
-    """Swin Transformer with dropout enabled during inference for uncertainty"""
-    
-    def __init__(self, num_classes=2, dropout_rate=0.3):
+    def __init__(self, num_classes=5, dropout_rate=0.3):
         super().__init__()
         
         self.backbone = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
         in_features = self.backbone.head.in_features
         
-        # Replace head with MC Dropout layers
+        # TRANSFORMERS PREFER LAYERNORM, NOT BATCHNORM
         self.backbone.head = nn.Sequential(
-            nn.BatchNorm1d(in_features),
+            nn.LayerNorm(in_features),
             nn.Dropout(p=dropout_rate),
             nn.Linear(in_features, 512),
             nn.GELU(),
-            nn.BatchNorm1d(512),
+            nn.LayerNorm(512),
             nn.Dropout(p=dropout_rate),
             nn.Linear(512, 256),
             nn.GELU(),
@@ -160,7 +158,6 @@ class SwinWithUncertainty(nn.Module):
         return self.backbone(x)
     
     def enable_dropout(self):
-        """Enable dropout for MC inference"""
         for module in self.modules():
             if isinstance(module, nn.Dropout):
                 module.train()
