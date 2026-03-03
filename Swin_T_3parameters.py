@@ -6,6 +6,7 @@ Journal-Worthy Architecture for Comprehensive Embryo Grading (EXP, ICM, TE)
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import WeightedRandomSampler
 from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.models import swin_t, Swin_T_Weights
 from torchvision import transforms
@@ -86,6 +87,24 @@ class MultiTaskGardnerDataset(Dataset):
         
         return image, l_exp, l_icm, l_te
     
+   def get_sample_weights(self):
+        # We will base the sampling weights primarily on the ICM grade, 
+        # as it is notoriously the most imbalanced in blastocyst datasets.
+        icm_counts = self.df["ICM_silver"].value_counts().to_dict()
+        
+        # Calculate the weight for each individual image in the dataset
+        sample_weights = []
+        for idx in range(len(self.df)):
+            row = self.df.iloc[idx]
+            icm_class = row["ICM_silver"]
+            
+            # The weight is the inverse of the class frequency
+            # Rare classes get high weights, common classes get low weights
+            weight = 1.0 / icm_counts.get(icm_class, 1.0)
+            sample_weights.append(weight)
+            
+        return torch.DoubleTensor(sample_weights)
+
     def get_class_weights(self):
         total = len(self.df)
         
@@ -312,14 +331,32 @@ def main():
     print(f"Device: {DEVICE}")
     full_dataset = MultiTaskGardnerDataset(TRAIN_CSV, IMG_FOLDER, transform=None)
     
+    # Get the sample weights BEFORE we split the dataset
+    sample_weights = full_dataset.get_sample_weights()
+    
     train_size = int(TRAIN_SPLIT * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
+    
+    # We need to manually split the indices to keep track of which weights belong to the training set
+    indices = list(range(len(full_dataset)))
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+    
+    # Extract just the training weights
+    train_weights = sample_weights[train_indices]
+    
+    # Create the sampler! (replacement=True means it can pick the same rare image multiple times per epoch)
+    sampler = WeightedRandomSampler(weights=train_weights, num_samples=len(train_weights), replacement=True)
+    
+    # Create the Subsets
+    train_ds = torch.utils.data.Subset(full_dataset, train_indices)
+    val_ds = torch.utils.data.Subset(full_dataset, val_indices)
     
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    # 🚨 CRITICAL: When using a sampler, shuffle MUST be False 🚨
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
     w_exp, w_icm, w_te = full_dataset.get_class_weights()
