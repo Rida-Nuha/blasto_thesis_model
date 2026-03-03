@@ -29,9 +29,7 @@ IMG_FOLDER = "/kaggle/input/dataset/Images/Images"           # ← FIXED
 SAVE_DIR = "kaggle/working/saved_models/uncertainty"        # ← FIXED
 METRICS_FILE = f"/kaggle/working/training_metrics_{TARGET_SCORE}_uncertainty.csv"
 
-BINARY_THRESHOLD = 2  # Good >= threshold
-
-NUM_CLASSES = 2
+NUM_CLASSES = 4  # Changed from 2 to 4 (labels 0, 1, 2, 3)
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -53,34 +51,31 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 # DATASET - KAGGLE READY
 # ============================================================
 class GardnerDataset(Dataset):
-    def __init__(self, csv_file, img_folder, target_column, threshold=2, transform=None):
+    def __init__(self, csv_file, img_folder, target_column,  transform=None):
         print(f"Loading {csv_file}...")
         self.df = pd.read_csv(csv_file, sep=';')
         self.img_folder = img_folder
         self.target_column = target_column
-        self.threshold = threshold
         self.transform = transform
         
-        # Filter valid samples and create binary labels
+       # Filter valid samples
         valid_mask = (
             self.df[target_column].notna() & 
             (self.df[target_column] != 'ND') & 
             (self.df[target_column] != 'NA')
         )
         self.df = self.df[valid_mask].copy()
-        self.df[target_column] = pd.to_numeric(self.df[target_column], errors='coerce')
-        self.df = self.df[self.df[target_column].notna()].copy()
         
-        self.df['binary_label'] = (self.df[target_column] >= threshold).astype(int)
+        # Convert directly to integers (0, 1, 2, 3)
+        self.df[target_column] = pd.to_numeric(self.df[target_column], errors='coerce').astype(int)
+        self.df = self.df[self.df[target_column].notna()].copy()
         
         print(f"\n{'='*60}")
         print(f"Dataset for {target_column}")
         print(f"{'='*60}")
         print(f"Total samples (after filtering): {len(self.df)}")
-        print(f"\nBinary distribution (threshold={threshold}):")
-        print(f"  Poor (0): {(self.df['binary_label'] == 0).sum()} samples ({(self.df['binary_label'] == 0).mean()*100:.1f}%)")
-        print(f"  Good (1): {(self.df['binary_label'] == 1).sum()} samples ({(self.df['binary_label'] == 1).mean()*100:.1f}%)")
-        print(f"  Imbalance ratio: {((self.df['binary_label'] == 0).sum() / max((self.df['binary_label'] == 1).sum(), 1)):.2f}:1")
+        print(f"\nClass distribution:")
+        print(self.df[target_column].value_counts().sort_index())
         print(f"{'='*60}\n")
     
     def __len__(self):
@@ -88,7 +83,6 @@ class GardnerDataset(Dataset):
     
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        
         img_path = os.path.join(self.img_folder, row['Image'])
         if not os.path.exists(img_path):
             raise FileNotFoundError(f"Image not found: {img_path}")
@@ -98,12 +92,14 @@ class GardnerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        label = row['binary_label']
+        # Fetch the original label, not the binary one
+        label = row[self.target_column]
         
         return image, label
     
     def get_class_weights(self):
-        counts = self.df['binary_label'].value_counts().sort_index().values
+        # Calculate weights based on the 4 original classes
+        counts = self.df[self.target_column].value_counts().sort_index().values
         total = len(self.df)
         weights = total / (len(counts) * counts)
         return torch.FloatTensor(weights)
@@ -234,8 +230,9 @@ def validate(model, loader, criterion, device):
     model.eval()
     total_loss, correct, total = 0, 0, 0
     
-    class_correct = torch.zeros(2)
-    class_total = torch.zeros(2)
+    # Change from 2 to NUM_CLASSES
+    class_correct = torch.zeros(NUM_CLASSES)
+    class_total = torch.zeros(NUM_CLASSES)
     
     with torch.no_grad():
         pbar = tqdm(loader, desc="Validation", leave=False)
@@ -250,7 +247,8 @@ def validate(model, loader, criterion, device):
             correct += (preds == labels).sum().item()
             total += labels.size(0)
             
-            for c in range(2):
+            # Change loop range to NUM_CLASSES
+            for c in range(NUM_CLASSES):
                 mask = labels == c
                 if mask.sum() > 0:
                     class_correct[c] += (preds[mask] == labels[mask]).sum().item()
@@ -261,7 +259,6 @@ def validate(model, loader, criterion, device):
     per_class_acc = (class_correct / (class_total + 1e-10)) * 100
     
     return total_loss / total, 100 * correct / total, per_class_acc
-
 # ============================================================
 # TRAIN SINGLE MODEL
 # ============================================================
@@ -294,7 +291,9 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
         print(f"Epoch {epoch+1}/{EPOCHS}:")
         print(f"  Train: Loss={train_loss:.4f}, Acc={train_acc:.2f}%")
         print(f"  Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
-        print(f"  Per-class: Poor={per_class[0]:.1f}%, Good={per_class[1]:.1f}%")
+      # Replace the hardcoded Poor/Good print statement with this:
+        per_class_str = ", ".join([f"Class {i}={acc:.1f}%" for i, acc in enumerate(per_class)])
+        print(f"  Per-class: {per_class_str}")
         
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -343,7 +342,6 @@ def main():
         TRAIN_CSV, 
         IMG_FOLDER, 
         TARGET_SCORE,
-        threshold=BINARY_THRESHOLD,
         transform=None
     )
     
@@ -364,9 +362,14 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
                            num_workers=NUM_WORKERS, pin_memory=True)
     
-    # Class weights
+   # Class weights
     class_weights = full_dataset.get_class_weights().to(DEVICE)
-    print(f"\nClass weights: Poor={class_weights[0]:.3f}, Good={class_weights[1]:.3f}")
+    
+    # Print the weights for all 4 classes
+    weights_str = ", ".join([f"Class {i}={w:.3f}" for i, w in enumerate(class_weights)])
+    print(f"\nClass weights: {weights_str}")
+    
+    # Train ensemble
     
     # Train ensemble
     results = []
