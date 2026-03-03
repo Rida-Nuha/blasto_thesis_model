@@ -1,12 +1,11 @@
 """
 Multi-Task Swin Transformer with MC Dropout for Uncertainty Estimation
-Journal-Worthy Architecture for Comprehensive Embryo Grading (EXP, ICM, TE)
+Architecture for Comprehensive Embryo Grading (EXP, ICM, TE)
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import WeightedRandomSampler
 from torch.utils.data import Dataset, DataLoader, random_split
 from torchvision.models import swin_t, Swin_T_Weights
 from torchvision import transforms
@@ -24,15 +23,14 @@ TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
 SAVE_DIR = "/kaggle/working/saved_models/multitask"        
 
-# Classes based on the clinical grading scale mappings
-NUM_CLASSES_EXP = 5  # 0->1, 1->2, 2->3, 3->4, 4->5
-NUM_CLASSES_ICM = 4  # 0->A, 1->B, 2->C, 3->ND
-NUM_CLASSES_TE = 4   # 0->A, 1->B, 2->C, 3->ND
+NUM_CLASSES_EXP = 5  
+NUM_CLASSES_ICM = 4  
+NUM_CLASSES_TE = 4   
 
 DROPOUT_RATE = 0.3  
 BATCH_SIZE = 32
 EPOCHS = 50
-LR = 1e-5  # Stabilized learning rate for Swin fine-tuning
+LR = 1e-5  
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
@@ -54,9 +52,7 @@ class MultiTaskGardnerDataset(Dataset):
         
         self.targets = ["EXP_silver", "ICM_silver", "TE_silver"]
         
-        # Filter valid samples for ALL THREE targets simultaneously
         for col in self.targets:
-            # We assume the CSV contains integers (0-4 for EXP, 0-3 for ICM/TE)
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
@@ -80,31 +76,12 @@ class MultiTaskGardnerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Fetch the original integer labels
         l_exp = row["EXP_silver"]
         l_icm = row["ICM_silver"]
         l_te = row["TE_silver"]
         
         return image, l_exp, l_icm, l_te
     
-    def get_sample_weights(self):
-        # We will base the sampling weights primarily on the ICM grade, 
-        # as it is notoriously the most imbalanced in blastocyst datasets.
-        icm_counts = self.df["ICM_silver"].value_counts().to_dict()
-        
-        # Calculate the weight for each individual image in the dataset
-        sample_weights = []
-        for idx in range(len(self.df)):
-            row = self.df.iloc[idx]
-            icm_class = row["ICM_silver"]
-            
-            # The weight is the inverse of the class frequency
-            # Rare classes get high weights, common classes get low weights
-            weight = 1.0 / icm_counts.get(icm_class, 1.0)
-            sample_weights.append(weight)
-            
-        return torch.DoubleTensor(sample_weights)
-
     def get_class_weights(self):
         total = len(self.df)
         
@@ -152,10 +129,8 @@ class MultiTaskSwinWithUncertainty(nn.Module):
         self.backbone = swin_t(weights=Swin_T_Weights.IMAGENET1K_V1)
         in_features = self.backbone.head.in_features
         
-        # Remove original single head
         self.backbone.head = nn.Identity()
         
-        # Create Three Independent Heads using LayerNorm
         self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
         self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
         self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
@@ -174,14 +149,9 @@ class MultiTaskSwinWithUncertainty(nn.Module):
     def forward(self, x):
         features = self.backbone(x)
         return self.exp_head(features), self.icm_head(features), self.te_head(features)
-    
-    def enable_dropout(self):
-        for module in self.modules():
-            if isinstance(module, nn.Dropout):
-                module.train()
 
 # ============================================================
-# UTILS
+# UTILS & TRAINING LOOP
 # ============================================================
 def set_seed(seed):
     random.seed(seed)
@@ -196,7 +166,6 @@ def train_epoch(model, loader, criteria, optimizer, device):
     total_loss = 0
     correct_exp, correct_icm, correct_te = 0, 0, 0
     total = 0
-    
     crit_exp, crit_icm, crit_te = criteria
     
     pbar = tqdm(loader, desc="Training", leave=False)
@@ -213,7 +182,6 @@ def train_epoch(model, loader, criteria, optimizer, device):
         loss_icm = crit_icm(out_icm, l_icm)
         loss_te = crit_te(out_te, l_te)
         
-        # Multi-task loss combination
         loss = loss_exp + loss_icm + loss_te
         
         loss.backward()
@@ -221,26 +189,18 @@ def train_epoch(model, loader, criteria, optimizer, device):
         optimizer.step()
         
         total_loss += loss.item() * images.size(0)
-        
         correct_exp += (torch.argmax(out_exp, dim=1) == l_exp).sum().item()
         correct_icm += (torch.argmax(out_icm, dim=1) == l_icm).sum().item()
         correct_te += (torch.argmax(out_te, dim=1) == l_te).sum().item()
         total += l_exp.size(0)
         
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-    
-    acc_exp = 100 * correct_exp / total
-    acc_icm = 100 * correct_icm / total
-    acc_te = 100 * correct_te / total
-    
-    return total_loss / total, (acc_exp, acc_icm, acc_te)
+    return total_loss / total, (100 * correct_exp / total, 100 * correct_icm / total, 100 * correct_te / total)
 
 def validate(model, loader, criteria, device):
     model.eval()
     total_loss = 0
     correct_exp, correct_icm, correct_te = 0, 0, 0
     total = 0
-    
     crit_exp, crit_icm, crit_te = criteria
     
     with torch.no_grad():
@@ -265,17 +225,8 @@ def validate(model, loader, criteria, device):
             correct_te += (torch.argmax(out_te, dim=1) == l_te).sum().item()
             total += l_exp.size(0)
             
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-            
-    acc_exp = 100 * correct_exp / total
-    acc_icm = 100 * correct_icm / total
-    acc_te = 100 * correct_te / total
-    
-    return total_loss / total, (acc_exp, acc_icm, acc_te)
+    return total_loss / total, (100 * correct_exp / total, 100 * correct_icm / total, 100 * correct_te / total)
 
-# ============================================================
-# MAIN TRAINING LOOP
-# ============================================================
 def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
     print(f"\n{'='*70}")
     print(f"TRAINING MULTI-TASK MODEL (SEED {seed})")
@@ -284,11 +235,11 @@ def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
     set_seed(seed)
     model = MultiTaskSwinWithUncertainty(DROPOUT_RATE).to(DEVICE)
     
-    # PyTorch's native stable loss function applied to all 3 tasks
+    # Restored to original: Using class weights directly in the loss function
     criteria = (
-        nn.CrossEntropyLoss(),
-        nn.CrossEntropyLoss(),
-        nn.CrossEntropyLoss()
+        nn.CrossEntropyLoss(weight=w_exp.to(DEVICE)),
+        nn.CrossEntropyLoss(weight=w_icm.to(DEVICE)),
+        nn.CrossEntropyLoss(weight=w_te.to(DEVICE))
     )
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -302,7 +253,6 @@ def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
         t_loss, (t_exp, t_icm, t_te) = train_epoch(model, train_loader, criteria, optimizer, DEVICE)
         v_loss, (v_exp, v_icm, v_te) = validate(model, val_loader, criteria, DEVICE)
         
-        # We track the average validation accuracy across all three tasks to determine the "best" model
         avg_val_acc = (v_exp + v_icm + v_te) / 3.0
         
         print(f"Epoch {epoch+1}/{EPOCHS}:")
@@ -331,32 +281,15 @@ def main():
     print(f"Device: {DEVICE}")
     full_dataset = MultiTaskGardnerDataset(TRAIN_CSV, IMG_FOLDER, transform=None)
     
-    # Get the sample weights BEFORE we split the dataset
-    sample_weights = full_dataset.get_sample_weights()
-    
     train_size = int(TRAIN_SPLIT * len(full_dataset))
     val_size = len(full_dataset) - train_size
-    
-    # We need to manually split the indices to keep track of which weights belong to the training set
-    indices = list(range(len(full_dataset)))
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:]
-    
-    # Extract just the training weights
-    train_weights = sample_weights[train_indices]
-    
-    # Create the sampler! (replacement=True means it can pick the same rare image multiple times per epoch)
-    sampler = WeightedRandomSampler(weights=train_weights, num_samples=len(train_weights), replacement=True)
-    
-    # Create the Subsets
-    train_ds = torch.utils.data.Subset(full_dataset, train_indices)
-    val_ds = torch.utils.data.Subset(full_dataset, val_indices)
+    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
     
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
     
-    # 🚨 CRITICAL: When using a sampler, shuffle MUST be False 🚨
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=NUM_WORKERS)
+    # Restored to original: simple shuffle=True, no sampler
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
     w_exp, w_icm, w_te = full_dataset.get_class_weights()
