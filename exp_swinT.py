@@ -58,7 +58,7 @@ class GardnerDataset(Dataset):
         self.target_column = target_column
         self.transform = transform
         
-       # Filter valid samples
+        # Filter valid samples
         valid_mask = (
             self.df[target_column].notna() & 
             (self.df[target_column] != 'ND') & 
@@ -66,7 +66,7 @@ class GardnerDataset(Dataset):
         )
         self.df = self.df[valid_mask].copy()
         
-        # Convert directly to integers (0, 1, 2, 3)
+        # Convert directly to integers
         self.df[target_column] = pd.to_numeric(self.df[target_column], errors='coerce').astype(int)
         self.df = self.df[self.df[target_column].notna()].copy()
         
@@ -92,12 +92,12 @@ class GardnerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # Fetch the original label, not the binary one
+        # Fetch the original label
         label = row[self.target_column]
         
         return image, label
     
-     def get_class_weights(self):
+    def get_class_weights(self):
         # Safely ensure weights array always matches NUM_CLASSES exactly
         total = len(self.df)
         weights = np.ones(NUM_CLASSES, dtype=np.float32)
