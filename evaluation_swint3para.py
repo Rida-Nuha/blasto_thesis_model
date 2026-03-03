@@ -43,30 +43,40 @@ ICM_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
 TE_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
 
 # ============================================================
-# DATASET (UPDATED FOR GOLD LABELS)
+# DATASET (UPDATED FOR GOLD LABELS - EXPLICIT FIX)
 # ============================================================
 class TestGardnerDataset(Dataset):
     def __init__(self, data_path, img_folder, transform=None):
         print(f"Loading Test Data: {data_path}...")
-        # Automatically handle CSV or Excel
+        
+        # Load the file
         if data_path.endswith('.csv'):
             self.df = pd.read_csv(data_path, sep=';')
         else:
             self.df = pd.read_excel(data_path)
             
+        # Strip invisible spaces from column names (Very common in Excel)
+        self.df.columns = self.df.columns.str.strip()
+        
         self.img_folder = img_folder
         self.transform = transform
         
-        # 🚨 UPDATED TARGETS TO MATCH YOUR EXCEL FILE 🚨
+        # We know these are the exact names from your print statement
         self.targets = ["EXP_gold", "ICM_gold", "TE_gold"]
         
+        # Verify columns exist
+        for col in self.targets:
+            if col not in self.df.columns:
+                raise KeyError(f"CRITICAL: '{col}' not found in dataframe columns: {self.df.columns.tolist()}")
+        
+        # Filter valid samples
         for col in self.targets:
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
             self.df = self.df[self.df[col].notna()].copy()
             
-        print(f"Total test samples: {len(self.df)}")
+        print(f"Total test samples ready for evaluation: {len(self.df)}")
 
     def __len__(self): return len(self.df)
 
@@ -76,7 +86,7 @@ class TestGardnerDataset(Dataset):
         image = Image.open(img_path).convert('RGB')
         if self.transform: image = self.transform(image)
         
-        # 🚨 UPDATED RETURN STATEMENT TO MATCH YOUR EXCEL FILE 🚨
+        # Double check we are using the gold strings here
         return image, row["EXP_gold"], row["ICM_gold"], row["TE_gold"]
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
