@@ -87,7 +87,7 @@ class MultiTaskGardnerDataset(Dataset):
         
         return image, l_exp, l_icm, l_te
     
-   def get_sample_weights(self):
+    def get_sample_weights(self):
         # We will base the sampling weights primarily on the ICM grade, 
         # as it is notoriously the most imbalanced in blastocyst datasets.
         icm_counts = self.df["ICM_silver"].value_counts().to_dict()
