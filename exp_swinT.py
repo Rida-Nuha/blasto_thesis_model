@@ -29,7 +29,7 @@ IMG_FOLDER = "/kaggle/input/dataset/Images/Images"           # ← FIXED
 SAVE_DIR = "kaggle/working/saved_models/uncertainty"        # ← FIXED
 METRICS_FILE = f"/kaggle/working/training_metrics_{TARGET_SCORE}_uncertainty.csv"
 
-NUM_CLASSES = 4  # Changed from 2 to 4 (labels 0, 1, 2, 3)
+NUM_CLASSES = 5  # Changed from 2 to 4 (labels 0, 1, 2, 3, 4)
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
 EPOCHS = 50
@@ -97,11 +97,18 @@ class GardnerDataset(Dataset):
         
         return image, label
     
-    def get_class_weights(self):
-        # Calculate weights based on the 4 original classes
-        counts = self.df[self.target_column].value_counts().sort_index().values
+  def get_class_weights(self):
+        # Safely ensure weights array always matches NUM_CLASSES exactly
         total = len(self.df)
-        weights = total / (len(counts) * counts)
+        weights = np.ones(NUM_CLASSES, dtype=np.float32)
+        counts = self.df[self.target_column].value_counts()
+        
+        for i in range(NUM_CLASSES):
+            if i in counts:
+                weights[i] = total / (NUM_CLASSES * counts[i])
+            else:
+                weights[i] = 1.0  # Safe fallback if a class is missing from the split
+                
         return torch.FloatTensor(weights)
 
 # Transforms
@@ -208,8 +215,9 @@ def train_epoch(model, loader, criterion, optimizer, device):
     
     pbar = tqdm(loader, desc="Training", leave=False)
     for images, labels in pbar:
-        images, labels = images.to(device), labels.to(device)
-        
+        images = images.to(device)
+        # Force the dtype to long here!
+        labels = labels.to(device, dtype=torch.long)
         optimizer.zero_grad()
         logits = model(images)
         loss = criterion(logits, labels)
