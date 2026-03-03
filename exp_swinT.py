@@ -33,7 +33,7 @@ NUM_CLASSES = 5  # Changed from 2 to 4 (labels 0, 1, 2, 3, 4)
 DROPOUT_RATE = 0.3  # Higher dropout for better uncertainty
 BATCH_SIZE = 32
 EPOCHS = 50
-LR = 1e-4
+LR = 2e-5
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
@@ -185,21 +185,6 @@ class SwinWithUncertainty(nn.Module):
         return mean_pred, entropy, variance
 
 # ============================================================
-# FOCAL LOSS
-# ============================================================
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-    
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', weight=self.alpha)
-        pt = torch.exp(-ce_loss)
-        focal_loss = ((1 - pt) ** self.gamma * ce_loss).mean()
-        return focal_loss
-
-# ============================================================
 # UTILS
 # ============================================================
 def set_seed(seed):
@@ -283,7 +268,7 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
     model.to(DEVICE)
     
     # Loss
-    criterion = FocalLoss(alpha=class_weights, gamma=2.0)
+   criterion = nn.CrossEntropyLoss(weight=class_weights)
     
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
