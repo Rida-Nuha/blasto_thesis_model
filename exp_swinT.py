@@ -268,7 +268,7 @@ def train_single_model(seed, model_idx, train_loader, val_loader, class_weights)
     model.to(DEVICE)
     
     # Loss
-   criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
