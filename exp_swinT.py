@@ -97,7 +97,7 @@ class GardnerDataset(Dataset):
         
         return image, label
     
-  def get_class_weights(self):
+     def get_class_weights(self):
         # Safely ensure weights array always matches NUM_CLASSES exactly
         total = len(self.df)
         weights = np.ones(NUM_CLASSES, dtype=np.float32)
@@ -110,6 +110,7 @@ class GardnerDataset(Dataset):
                 weights[i] = 1.0  # Safe fallback if a class is missing from the split
                 
         return torch.FloatTensor(weights)
+
 
 # Transforms
 train_transform = transforms.Compose([
