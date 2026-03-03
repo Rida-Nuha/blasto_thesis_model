@@ -19,9 +19,9 @@ import numpy as np
 # ============================================================
 # CONFIGURATION
 # ============================================================
-TRAIN_CSV = "/kaggle/input/dataset/Gardner_train_silver.csv"  
-IMG_FOLDER = "/kaggle/input/dataset/Images/Images"            
-SAVE_DIR = "kaggle/working/saved_models/multitask"        
+TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"  
+IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
+SAVE_DIR = "/kaggle/working/saved_models/multitask"        
 
 # Classes based on the clinical grading scale mappings
 NUM_CLASSES_EXP = 5  # 0->1, 1->2, 2->3, 3->4, 4->5
