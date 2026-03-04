@@ -1,7 +1,7 @@
 """
 Multi-Task Swin Transformer Evaluation Script
-Standard Categorical Outputs with MC Dropout Uncertainty
-Final Champion Baseline Evaluation
+Standard Categorical Outputs with MC Dropout Uncertainty Analysis
+Final Champion Baseline Evaluation (50 Passes, Locked Seed)
 """
 
 import torch
@@ -26,9 +26,8 @@ import scipy.stats
 TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xlsx"
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 
-# 🚨 VERIFY THIS MATCHES YOUR SAVED CHAMPION MODEL
 MODEL_PATH = "/kaggle/working/saved_models/swin_champion_baseline/multitask_seed42_best.pth"
-SAVE_DIR = "/kaggle/working/evaluation_plots_swintmodel_baseline"
+SAVE_DIR = "/kaggle/working/evaluation_plots_champion_baseline"
 
 NUM_CLASSES_EXP = 5  
 NUM_CLASSES_ICM = 3  
@@ -36,21 +35,11 @@ NUM_CLASSES_TE = 3
 
 DROPOUT_RATE = 0.3  
 BATCH_SIZE = 1  
-MC_PASSES = 50
+MC_PASSES = 50  # 🚨 Locked at 50 for the rigorous baseline
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-def set_seed(seed=42):
-    import random
-    import numpy as np
-    import torch
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 # ============================================================
 # 2. DATASET (Strict 3-Class Enforced)
 # ============================================================
@@ -68,7 +57,6 @@ class GardnerTestDataset(Dataset):
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
             
-            # 🚨 STRICT FILTER: Drop anything >= 3 for ICM and TE
             if col in ["ICM_gold", "TE_gold"]:
                 self.df = self.df[self.df[col] < 3].copy() 
                 
@@ -85,7 +73,6 @@ class GardnerTestDataset(Dataset):
         if self.transform:
             image = self.transform(image)
             
-        # Keep raw labels for the true targets (e.g., EXP remains 1-5)
         l_exp = int(row["EXP_gold"])
         l_icm = int(row["ICM_gold"])
         l_te = int(row["TE_gold"])
@@ -104,7 +91,6 @@ val_transform = transforms.Compose([
 class MultiTaskSwinWithUncertainty(nn.Module):
     def __init__(self, dropout_rate=0.3):
         super().__init__()
-        # We don't need to load ImageNet weights for evaluation, just the architecture
         self.backbone = swin_t(weights=None)
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
@@ -137,6 +123,15 @@ class MultiTaskSwinWithUncertainty(nn.Module):
 # ============================================================
 # 4. PREDICTION & UNCERTAINTY UTILS
 # ============================================================
+def set_seed(seed=42):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def calculate_entropy(preds):
     mean_preds = np.mean(preds, axis=0)[0]
     entropy = scipy.stats.entropy(mean_preds)
@@ -152,7 +147,6 @@ def predict_with_uncertainty(model, image, passes=MC_PASSES):
         for _ in range(passes):
             out_exp, out_icm, out_te = model(image)
             
-            # Standard Softmax for categorical outputs
             exp_probs = F.softmax(out_exp, dim=1)
             icm_probs = F.softmax(out_icm, dim=1)
             te_probs = F.softmax(out_te, dim=1)
@@ -172,9 +166,7 @@ def predict_with_uncertainty(model, image, passes=MC_PASSES):
     return (np.argmax(exp_mean), exp_ent), (np.argmax(icm_mean), icm_ent), (np.argmax(te_mean), te_ent)
 
 def plot_confusion_matrix(y_true, y_pred, classes, title, filename, labels=None):
-    # 🚨 Force the matrix to be the exact size of our labels array, filling missing with 0
     cm = confusion_matrix(y_true, y_pred, labels=labels)
-    
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
     plt.title(title)
@@ -184,15 +176,31 @@ def plot_confusion_matrix(y_true, y_pred, classes, title, filename, labels=None)
     plt.savefig(os.path.join(SAVE_DIR, filename), dpi=300)
     plt.close()
 
+def plot_uncertainty_boxplots(y_true, y_pred, uncertainties, title, filename):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    uncertainties = np.array(uncertainties)
+    
+    status = np.where(y_true == y_pred, 'Correct', 'Incorrect')
+    
+    df = pd.DataFrame({'Prediction Status': status, 'Entropy (Uncertainty)': uncertainties})
+    
+    plt.figure(figsize=(8, 6))
+    sns.boxplot(x='Prediction Status', y='Entropy (Uncertainty)', data=df, palette={'Correct': 'lightgreen', 'Incorrect': 'lightcoral'})
+    sns.stripplot(x='Prediction Status', y='Entropy (Uncertainty)', data=df, color='black', alpha=0.3, jitter=True)
+    plt.title(f"{title} - Uncertainty Distribution (Swin-T)")
+    plt.ylabel('Predictive Entropy (MC Dropout)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(SAVE_DIR, filename), dpi=300)
+    plt.close()
+
 # ============================================================
 # 5. MAIN EVALUATION LOOP
 # ============================================================
 def evaluate_mc_dropout():
-    # 🚨 LOCK THE RANDOMNESS HERE
-    set_seed(42) 
+    set_seed(42) # 🚨 Locked randomness for exact reproducibility
     
     print("Loading Champion Swin-T Baseline Model for Evaluation...")
-    # ... rest of the evaluation code ...
     model = MultiTaskSwinWithUncertainty(dropout_rate=DROPOUT_RATE).to(DEVICE)
     
     if not os.path.exists(MODEL_PATH):
@@ -205,28 +213,30 @@ def evaluate_mc_dropout():
     test_ds = GardnerTestDataset(TEST_DATA_PATH, IMG_FOLDER, transform=val_transform)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
     
-    all_exp_true, all_exp_pred = [], []
-    all_icm_true, all_icm_pred = [], []
-    all_te_true, all_te_pred = [], []
+    all_exp_true, all_exp_pred, all_exp_ent = [], [], []
+    all_icm_true, all_icm_pred, all_icm_ent = [], [], []
+    all_te_true, all_te_pred, all_te_ent = [], [], []
     
     print(f"Running MC Dropout Inference ({MC_PASSES} passes per image)...")
     for image, l_exp, l_icm, l_te in tqdm(test_loader, desc="Evaluating"):
         image = image.to(DEVICE)
         
-        (p_exp, _), (p_icm, _), (p_te, _) = predict_with_uncertainty(model, image)
+        # 🚨 Capturing the entropy values!
+        (p_exp, ent_exp), (p_icm, ent_icm), (p_te, ent_te) = predict_with_uncertainty(model, image)
         
-        # 🚨 FORMAT FIX: The model predicts 0-4 for EXP, but true dataset labels are 1-5. 
-        # Add 1 to the prediction so it matches the raw dataset label for metric calculation!
         pred_exp_val = p_exp + 1 
         
         all_exp_true.append(l_exp.item())
         all_exp_pred.append(pred_exp_val)
+        all_exp_ent.append(ent_exp)
         
         all_icm_true.append(l_icm.item())
         all_icm_pred.append(p_icm)
+        all_icm_ent.append(ent_icm)
         
         all_te_true.append(l_te.item())
         all_te_pred.append(p_te)
+        all_te_ent.append(ent_te)
 
     # ---------------------------------------------------------
     # CALCULATE METRICS
@@ -264,11 +274,17 @@ def evaluate_mc_dropout():
     print(f"TE  - Precision: {te_prec*100:.2f}% | Recall: {te_rec*100:.2f}%")
     print("==================================================\n")
 
-    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Confusion Matrix Expansion', 'cm_exp_baseline.png', labels=[1, 2, 3, 4, 5])
-    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Confusion Matrix ICM', 'cm_icm_baseline.png', labels=[0, 1, 2])
-    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Confusion Matrix TE', 'cm_te_baseline.png', labels=[0, 1, 2])
+    # Generate Confusion Matrices
+    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Champion Baseline - Expansion', 'cm_exp_baseline.png', labels=[1, 2, 3, 4, 5])
+    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Champion Baseline - ICM', 'cm_icm_baseline.png', labels=[0, 1, 2])
+    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Champion Baseline - TE', 'cm_te_baseline.png', labels=[0, 1, 2])
     
-    print(f"✅ All evaluation plots saved successfully to: {SAVE_DIR}")
+    # Generate Uncertainty Plots
+    plot_uncertainty_boxplots(all_exp_true, all_exp_pred, all_exp_ent, 'Expansion', 'uncertainty_exp.png')
+    plot_uncertainty_boxplots(all_icm_true, all_icm_pred, all_icm_ent, 'ICM', 'uncertainty_icm.png')
+    plot_uncertainty_boxplots(all_te_true, all_te_pred, all_te_ent, 'TE', 'uncertainty_te.png')
+
+    print(f"✅ All evaluation plots (including Uncertainty Boxplots) saved successfully to: {SAVE_DIR}")
 
 if __name__ == "__main__":
     evaluate_mc_dropout()
