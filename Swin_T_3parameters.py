@@ -1,7 +1,7 @@
 """
-Multi-Task Swin Transformer (Microscopy Pre-trained)
+Multi-Task Swin Transformer (Standard ImageNet Pre-trained)
 Featuring "Full Focal" Architecture for Extreme Imbalance
-Final Champion Master's Thesis Training Script
+Final Baseline Master's Thesis Training Script
 """
 
 import torch
@@ -23,10 +23,7 @@ import numpy as np
 # ============================================================
 TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"  
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
-SAVE_DIR = "/kaggle/working/saved_models/swin_focal_champion"        
-
-# 🚨 VERIFY YOUR MICROSCOPY WEIGHTS KAGGLE PATH HERE
-MICROSCOPY_WEIGHTS_PATH = "/kaggle/input/models/ridakhan09/embryo-grading-pretrained-weights/pytorch/base-weights/1/swin_tiny_patch4_window7_224_orig_Imge_micro.pth"
+SAVE_DIR = "/kaggle/working/saved_models/swin_focal_imagenet"        
 
 NUM_CLASSES_EXP = 5  
 NUM_CLASSES_ICM = 3  # A, B, C 
@@ -100,7 +97,6 @@ class MultiTaskGardnerDataset(Dataset):
         exp_val = int(row["EXP_silver"])
         l_exp = torch.tensor(exp_val - 1 if exp_val >= 1 else exp_val, dtype=torch.long)
         
-        # Assuming original dataset mapped A=0, B=1, C=2
         l_icm = torch.tensor(int(row["ICM_silver"]), dtype=torch.long)
         l_te = torch.tensor(int(row["TE_silver"]), dtype=torch.long)
         
@@ -124,23 +120,15 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# 4. SWIN-T MODEL (CATEGORICAL HEADS)
+# 4. SWIN-T MODEL (STANDARD IMAGENET WEIGHTS)
 # ============================================================
-class MultiTaskMicroscopySwin(nn.Module):
-    def __init__(self, weight_path, dropout_rate=0.3):
+class MultiTaskSwinT(nn.Module):
+    def __init__(self, dropout_rate=0.3):
         super().__init__()
-        self.backbone = swin_t(weights=None)
         
-        if os.path.exists(weight_path):
-            print(f"Injecting Microscopy Weights from: {weight_path}")
-            checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
-            
-            state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-            # Strip the old heads to avoid dimension mismatch
-            state_dict = {k: v for k, v in state_dict.items() if not k.startswith('head.')}
-            self.backbone.load_state_dict(state_dict, strict=False)
-        else:
-            print(f"⚠️ WARNING: Microscopy weights not found. Training from scratch!")
+        # 🚨 Pulls the standard ImageNet weights natively from PyTorch
+        print("Injecting Standard ImageNet Weights...")
+        self.backbone = swin_t(weights="DEFAULT")
             
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
@@ -245,11 +233,11 @@ def validate(model, loader, criteria, device):
 
 def train_single_model(seed, train_loader, val_loader):
     print(f"\n{'='*70}")
-    print(f"TRAINING SWIN-T WITH FULL FOCAL LOSS (SEED {seed})")
+    print(f"TRAINING STANDARD SWIN-T WITH FULL FOCAL LOSS (SEED {seed})")
     print(f"{'='*70}\n")
     
     set_seed(seed)
-    model = MultiTaskMicroscopySwin(MICROSCOPY_WEIGHTS_PATH, DROPOUT_RATE).to(DEVICE)
+    model = MultiTaskSwinT(DROPOUT_RATE).to(DEVICE)
     
     focal_criteria = FocalLoss(gamma=2.0) 
     
@@ -275,7 +263,7 @@ def train_single_model(seed, train_loader, val_loader):
             best_avg_acc = avg_val_acc
             best_epoch = epoch + 1
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"swin_focal_seed{seed}_best.pth"))
+            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"swin_imagenet_focal_seed{seed}_best.pth"))
             print(f"   🎯 New best average accuracy! (saved)")
         else:
             patience_counter += 1
