@@ -36,11 +36,21 @@ NUM_CLASSES_TE = 3
 
 DROPOUT_RATE = 0.3  
 BATCH_SIZE = 1  
-MC_PASSES = 20
+MC_PASSES = 50
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+def set_seed(seed=42):
+    import random
+    import numpy as np
+    import torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 # ============================================================
 # 2. DATASET (Strict 3-Class Enforced)
 # ============================================================
@@ -178,7 +188,11 @@ def plot_confusion_matrix(y_true, y_pred, classes, title, filename, labels=None)
 # 5. MAIN EVALUATION LOOP
 # ============================================================
 def evaluate_mc_dropout():
+    # 🚨 LOCK THE RANDOMNESS HERE
+    set_seed(42) 
+    
     print("Loading Champion Swin-T Baseline Model for Evaluation...")
+    # ... rest of the evaluation code ...
     model = MultiTaskSwinWithUncertainty(dropout_rate=DROPOUT_RATE).to(DEVICE)
     
     if not os.path.exists(MODEL_PATH):
