@@ -1,6 +1,6 @@
 """
 Multi-Task Swin Transformer (Microscopy Pre-trained)
-Featuring CORAL Ordinal Loss and MC Dropout Uncertainty
+Featuring CORAL Ordinal Loss, MC Dropout Uncertainty, and Weighted Sampler
 Final Master's Thesis Training Script
 """
 
@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler
 from torchvision.models import swin_t
 from torchvision import transforms
 from PIL import Image
@@ -25,7 +25,6 @@ TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
 SAVE_DIR = "/kaggle/working/saved_models/swin_microscopy_coral"        
 
-# 🚨 PASTE YOUR MICROSCOPY WEIGHTS KAGGLE PATH HERE
 MICROSCOPY_WEIGHTS_PATH = "/kaggle/input/models/ridakhan09/embryo-grading-pretrained-weights/pytorch/base-weights/1/swin_tiny_patch4_window7_224_orig_Imge_micro.pth"
 
 NUM_CLASSES_EXP = 5  
@@ -132,15 +131,12 @@ class MultiTaskMicroscopySwin(nn.Module):
             print(f"Injecting Microscopy Weights from: {weight_path}")
             checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
             
-            # Extract the state dictionary
             state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
-            
-            # 🚨 THE FIX: Delete the old 74-class head weights so PyTorch doesn't crash!
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith('head.')}
-            
             self.backbone.load_state_dict(state_dict, strict=False)
         else:
             print(f"⚠️ WARNING: Microscopy weights not found. Training from scratch!")
+            
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
         
@@ -239,7 +235,7 @@ def validate(model, loader, criteria, device):
 
 def train_single_model(seed, train_loader, val_loader):
     print(f"\n{'='*70}")
-    print(f"TRAINING SWIN-T (MICROSCOPY) WITH CORAL LOSS (SEED {seed})")
+    print(f"TRAINING SWIN-T WITH CORAL & WEIGHTED SAMPLER (SEED {seed})")
     print(f"{'='*70}\n")
     
     set_seed(seed)
@@ -291,7 +287,29 @@ def main():
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    # 🚨🚨 NEW FIX: WEIGHTED RANDOM SAMPLER 🚨🚨
+    print("\n⚖️ Balancing dataset classes with WeightedRandomSampler...")
+    
+    # Extract the original integer labels for the training set (from your silver dataframe)
+    train_targets = train_ds.dataset.df.iloc[train_ds.indices]["ICM_silver"].values
+    
+    # Find unique classes and calculate how many times they appear
+    unique_classes = np.unique(train_targets)
+    class_sample_count = np.array([len(np.where(train_targets == t)[0]) for t in unique_classes])
+    
+    # The weight of a class is inversely proportional to its frequency
+    weight = 1. / class_sample_count
+    weight_map = {t: w for t, w in zip(unique_classes, weight)}
+    
+    # Map the weights back to every individual image in the training set
+    samples_weight = np.array([weight_map[t] for t in train_targets])
+    samples_weight = torch.from_numpy(samples_weight).double()
+    
+    # Create the sampler!
+    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+    
+    # 🚨 CRITICAL: When using a sampler, shuffle MUST be set to False
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
     train_single_model(SEEDS[0], train_loader, val_loader)
