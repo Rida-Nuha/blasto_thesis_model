@@ -1,6 +1,6 @@
 """
-Multi-Task ResNet50 with MC Dropout for Uncertainty Estimation
-Ablation Study Model for Master's Thesis (Kaggle Version)
+Multi-Task ResNet50 Baseline
+CNN Comparison Architecture for Comprehensive Embryo Grading (EXP, ICM, TE)
 """
 
 import torch
@@ -17,20 +17,20 @@ import random
 import numpy as np
 
 # ============================================================
-# CONFIGURATION (Set for Kaggle environment)
+# 1. CONFIGURATION
 # ============================================================
 TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"  
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
-SAVE_DIR = "/kaggle/working/saved_models/resnet50"        
+SAVE_DIR = "/kaggle/working/saved_models/resnet50_champion_baseline"        
 
 NUM_CLASSES_EXP = 5  
-NUM_CLASSES_ICM = 4  
-NUM_CLASSES_TE = 4   
+NUM_CLASSES_ICM = 3  
+NUM_CLASSES_TE = 3   
 
 DROPOUT_RATE = 0.3  
 BATCH_SIZE = 32
 EPOCHS = 50
-LR = 1e-4  # ResNet usually tolerates a slightly higher learning rate than Swin
+LR = 1e-5  
 WEIGHT_DECAY = 5e-4
 TRAIN_SPLIT = 0.85
 NUM_WORKERS = 2
@@ -41,7 +41,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ============================================================
-# DATASET
+# 2. DATASET (Identical to Swin-T Setup)
 # ============================================================
 class MultiTaskGardnerDataset(Dataset):
     def __init__(self, csv_file, img_folder, transform=None):
@@ -56,8 +56,17 @@ class MultiTaskGardnerDataset(Dataset):
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
-            self.df = self.df[self.df[col].notna()].copy()
             
+            if col in ["ICM_silver", "TE_silver"]:
+                self.df = self.df[self.df[col] < 3].copy() 
+                
+            self.df = self.df[self.df[col].notna()].copy()
+        
+        print(f"\n{'='*60}")
+        print("MULTI-TASK DATASET LOADED (STRICT 3-CLASS FOR ICM/TE)")
+        print(f"Total valid multi-task samples: {len(self.df)}")
+        print(f"{'='*60}\n")
+    
     def __len__(self):
         return len(self.df)
     
@@ -71,9 +80,12 @@ class MultiTaskGardnerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        l_exp = row["EXP_silver"]
-        l_icm = row["ICM_silver"]
-        l_te = row["TE_silver"]
+        exp_val = int(row["EXP_silver"])
+        l_exp = exp_val - 1 if exp_val >= 1 else exp_val
+        l_exp = torch.tensor(l_exp, dtype=torch.long)
+        
+        l_icm = torch.tensor(int(row["ICM_silver"]), dtype=torch.long)
+        l_te = torch.tensor(int(row["TE_silver"]), dtype=torch.long)
         
         return image, l_exp, l_icm, l_te
     
@@ -81,7 +93,10 @@ class MultiTaskGardnerDataset(Dataset):
         total = len(self.df)
         def calc_weights(col_name, num_c):
             weights = np.ones(num_c, dtype=np.float32)
-            counts = self.df[col_name].value_counts()
+            if col_name == "EXP_silver":
+                counts = (self.df[col_name] - 1).value_counts()
+            else:
+                counts = self.df[col_name].value_counts()
             for i in range(num_c):
                 if i in counts:
                     weights[i] = total / (num_c * counts[i])
@@ -91,7 +106,6 @@ class MultiTaskGardnerDataset(Dataset):
             
         return calc_weights("EXP_silver", NUM_CLASSES_EXP), calc_weights("ICM_silver", NUM_CLASSES_ICM), calc_weights("TE_silver", NUM_CLASSES_TE)
 
-# Transforms
 train_transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.RandomCrop(224),
@@ -110,22 +124,20 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# RESNET50 MULTI-TASK MODEL
+# 3. MULTI-TASK RESNET50 MODEL
 # ============================================================
-class MultiTaskResNetWithUncertainty(nn.Module):
+class MultiTaskResNet50(nn.Module):
     def __init__(self, dropout_rate=0.3):
         super().__init__()
         
-        # 1. Load the pre-trained ResNet50
-        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-        
-        # 2. Get the number of input features going into the final fully connected layer
+        # Load standard ResNet50
+        self.backbone = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         in_features = self.backbone.fc.in_features
         
-        # 3. Remove the original ResNet classification head
+        # Remove original fully connected layer
         self.backbone.fc = nn.Identity()
         
-        # 4. Attach our custom MC Dropout Multi-Task Heads
+        # Exact same head architecture as your Swin-T for a fair comparison
         self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
         self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
         self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
@@ -142,18 +154,16 @@ class MultiTaskResNetWithUncertainty(nn.Module):
         )
         
     def forward(self, x):
-        # Extract features using ResNet50
         features = self.backbone(x)
-        # Pass features to our three independent heads
         return self.exp_head(features), self.icm_head(features), self.te_head(features)
-
+    
     def enable_dropout(self):
         for module in self.modules():
             if isinstance(module, nn.Dropout):
                 module.train()
 
 # ============================================================
-# UTILS & TRAINING LOOP
+# 4. UTILS & TRAINING LOOP
 # ============================================================
 def set_seed(seed):
     random.seed(seed)
@@ -165,27 +175,17 @@ def set_seed(seed):
 
 def train_epoch(model, loader, criteria, optimizer, device):
     model.train()
-    total_loss = 0
-    correct_exp, correct_icm, correct_te = 0, 0, 0
-    total = 0
+    total_loss, correct_exp, correct_icm, correct_te, total = 0, 0, 0, 0, 0
     crit_exp, crit_icm, crit_te = criteria
     
     pbar = tqdm(loader, desc="Training", leave=False)
     for images, l_exp, l_icm, l_te in pbar:
-        images = images.to(device)
-        l_exp = l_exp.to(device, dtype=torch.long)
-        l_icm = l_icm.to(device, dtype=torch.long)
-        l_te = l_te.to(device, dtype=torch.long)
+        images, l_exp, l_icm, l_te = images.to(device), l_exp.to(device), l_icm.to(device), l_te.to(device)
         
         optimizer.zero_grad()
         out_exp, out_icm, out_te = model(images)
         
-        loss_exp = crit_exp(out_exp, l_exp)
-        loss_icm = crit_icm(out_icm, l_icm)
-        loss_te = crit_te(out_te, l_te)
-        
-        loss = loss_exp + loss_icm + loss_te
-        
+        loss = crit_exp(out_exp, l_exp) + crit_icm(out_icm, l_icm) + crit_te(out_te, l_te)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -200,26 +200,15 @@ def train_epoch(model, loader, criteria, optimizer, device):
 
 def validate(model, loader, criteria, device):
     model.eval()
-    total_loss = 0
-    correct_exp, correct_icm, correct_te = 0, 0, 0
-    total = 0
+    total_loss, correct_exp, correct_icm, correct_te, total = 0, 0, 0, 0, 0
     crit_exp, crit_icm, crit_te = criteria
     
     with torch.no_grad():
-        pbar = tqdm(loader, desc="Validation", leave=False)
-        for images, l_exp, l_icm, l_te in pbar:
-            images = images.to(device)
-            l_exp = l_exp.to(device, dtype=torch.long)
-            l_icm = l_icm.to(device, dtype=torch.long)
-            l_te = l_te.to(device, dtype=torch.long)
-            
+        for images, l_exp, l_icm, l_te in tqdm(loader, desc="Validation", leave=False):
+            images, l_exp, l_icm, l_te = images.to(device), l_exp.to(device), l_icm.to(device), l_te.to(device)
             out_exp, out_icm, out_te = model(images)
             
-            loss_exp = crit_exp(out_exp, l_exp)
-            loss_icm = crit_icm(out_icm, l_icm)
-            loss_te = crit_te(out_te, l_te)
-            
-            loss = loss_exp + loss_icm + loss_te
+            loss = crit_exp(out_exp, l_exp) + crit_icm(out_icm, l_icm) + crit_te(out_te, l_te)
             total_loss += loss.item() * images.size(0)
             
             correct_exp += (torch.argmax(out_exp, dim=1) == l_exp).sum().item()
@@ -231,24 +220,17 @@ def validate(model, loader, criteria, device):
 
 def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
     print(f"\n{'='*70}")
-    print(f"TRAINING RESNET50 MULTI-TASK MODEL (SEED {seed})")
+    print(f"TRAINING RESNET50 BASELINE (SEED {seed})")
     print(f"{'='*70}\n")
     
     set_seed(seed)
-    model = MultiTaskResNetWithUncertainty(DROPOUT_RATE).to(DEVICE)
+    model = MultiTaskResNet50(DROPOUT_RATE).to(DEVICE)
     
-    criteria = (
-        nn.CrossEntropyLoss(weight=w_exp.to(DEVICE)),
-        nn.CrossEntropyLoss(weight=w_icm.to(DEVICE)),
-        nn.CrossEntropyLoss(weight=w_te.to(DEVICE))
-    )
-    
+    criteria = (nn.CrossEntropyLoss(weight=w_exp.to(DEVICE)), nn.CrossEntropyLoss(weight=w_icm.to(DEVICE)), nn.CrossEntropyLoss(weight=w_te.to(DEVICE)))
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
     
-    best_avg_acc = 0
-    best_epoch = 0
-    patience_counter = 0
+    best_avg_acc, best_epoch, patience_counter = 0, 0, 0
     
     for epoch in range(EPOCHS):
         t_loss, (t_exp, t_icm, t_te) = train_epoch(model, train_loader, criteria, optimizer, DEVICE)
@@ -256,35 +238,26 @@ def train_single_model(seed, train_loader, val_loader, w_exp, w_icm, w_te):
         
         avg_val_acc = (v_exp + v_icm + v_te) / 3.0
         
-        print(f"Epoch {epoch+1}/{EPOCHS}:")
-        print(f"  Train Loss: {t_loss:.4f} | Acc: EXP={t_exp:.1f}%, ICM={t_icm:.1f}%, TE={t_te:.1f}%")
-        print(f"  Val Loss:   {v_loss:.4f} | Acc: EXP={v_exp:.1f}%, ICM={v_icm:.1f}%, TE={v_te:.1f}%")
-        print(f"  --> Average Val Acc: {avg_val_acc:.2f}%")
+        print(f"Epoch {epoch+1}/{EPOCHS}:  Val Loss: {v_loss:.4f} | Avg Acc: {avg_val_acc:.2f}% (EXP:{v_exp:.1f}%, ICM:{v_icm:.1f}%, TE:{v_te:.1f}%)")
         
         if avg_val_acc > best_avg_acc:
-            best_avg_acc = avg_val_acc
-            best_epoch = epoch + 1
-            patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"resnet50_seed{seed}_best.pth"))
+            best_avg_acc, best_epoch, patience_counter = avg_val_acc, epoch + 1, 0
+            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"resnet50_multitask_seed{seed}_best.pth"))
             print(f"   🎯 New best average accuracy! (saved)")
         else:
             patience_counter += 1
             if patience_counter >= PATIENCE:
                 print(f"\n🛑 Early stopping at epoch {epoch+1}")
                 break
-                
         scheduler.step()
-        print()
         
     print(f"\n✅ Training finished! Best Avg Acc: {best_avg_acc:.2f}% at epoch {best_epoch}")
 
 def main():
     print(f"Device: {DEVICE}")
     full_dataset = MultiTaskGardnerDataset(TRAIN_CSV, IMG_FOLDER, transform=None)
-    
     train_size = int(TRAIN_SPLIT * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
+    train_ds, val_ds = random_split(full_dataset, [train_size, len(full_dataset) - train_size])
     
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
@@ -293,7 +266,6 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
     w_exp, w_icm, w_te = full_dataset.get_class_weights()
-    
     train_single_model(SEEDS[0], train_loader, val_loader, w_exp, w_icm, w_te)
 
 if __name__ == "__main__":
