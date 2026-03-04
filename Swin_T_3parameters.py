@@ -130,7 +130,7 @@ class MultiTaskMicroscopySwin(nn.Module):
         
         if os.path.exists(weight_path):
             print(f"Injecting Microscopy Weights from: {weight_path}")
-            checkpoint = torch.load(weight_path, map_location='cpu')
+            checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
             if 'model' in checkpoint:
                 self.backbone.load_state_dict(checkpoint['model'], strict=False)
             else:
