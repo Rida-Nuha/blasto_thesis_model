@@ -161,8 +161,10 @@ def predict_with_uncertainty(model, image, passes=MC_PASSES):
     
     return (np.argmax(exp_mean), exp_ent), (np.argmax(icm_mean), icm_ent), (np.argmax(te_mean), te_ent)
 
-def plot_confusion_matrix(y_true, y_pred, classes, title, filename):
-    cm = confusion_matrix(y_true, y_pred)
+def plot_confusion_matrix(y_true, y_pred, classes, title, filename, labels=None):
+    # 🚨 Force the matrix to be the exact size of our labels array, filling missing with 0
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
     plt.title(title)
@@ -248,9 +250,9 @@ def evaluate_mc_dropout():
     print(f"TE  - Precision: {te_prec*100:.2f}% | Recall: {te_rec*100:.2f}%")
     print("==================================================\n")
 
-    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Champion Baseline - Expansion', 'cm_exp_baseline.png')
-    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Champion Baseline - ICM', 'cm_icm_baseline.png')
-    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Champion Baseline - TE', 'cm_te_baseline.png')
+    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Confusion Matrix Expansion', 'cm_exp_baseline.png', labels=[1, 2, 3, 4, 5])
+    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Confusion Matrix ICM', 'cm_icm_baseline.png', labels=[0, 1, 2])
+    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Confusion Matrix TE', 'cm_te_baseline.png', labels=[0, 1, 2])
     
     print(f"✅ All evaluation plots saved successfully to: {SAVE_DIR}")
 
