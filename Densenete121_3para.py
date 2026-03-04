@@ -26,8 +26,7 @@ IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 SAVE_DIR = "/kaggle/working/saved_models/densenet_baseline"        
 
 # 🚨 PASTE YOUR RADIMAGENET DENSENET121 .PT PATH HERE
-RADIMAGENET_WEIGHTS_PATH = "/kaggle/input/your-dataset-name/RadImageNet-DenseNet121.pt"
-
+RADIMAGENET_WEIGHTS_PATH = "/kaggle/input/models/ridakhan09/embryo-grading-pretrained-weights/pytorch/base-weights/1/DenseNet121.pt"
 NUM_CLASSES_EXP = 5  
 NUM_CLASSES_ICM = 3  
 NUM_CLASSES_TE = 3   
