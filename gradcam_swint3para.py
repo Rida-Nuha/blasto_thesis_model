@@ -90,6 +90,14 @@ sample_images = df['Image'].head(5).tolist()
 # ============================================================
 # 4. GRAD-CAM GENERATION
 # ============================================================
+
+# 🚨 THE FIX: Translate the Swin-T matrix shape for standard Grad-CAM
+def reshape_transform(tensor):
+    # Swin outputs [Batch, Height, Width, Channels]
+    # Grad-CAM expects [Batch, Channels, Height, Width]
+    result = tensor.permute(0, 3, 1, 2)
+    return result
+
 def generate_heatmaps():
     print("Loading Champion Model...")
     base_model = MultiTaskSwinWithUncertainty().to(DEVICE)
@@ -106,11 +114,7 @@ def generate_heatmaps():
         if not os.path.exists(img_path): continue
             
         raw_pil = Image.open(img_path).convert('RGB')
-        
-        # Prepare plot image (0 to 1 float scale for overlay)
         img_plot = np.float32(plot_transform(raw_pil)) / 255.0
-        
-        # Prepare model tensor
         input_tensor = model_transform(raw_pil).unsqueeze(0).to(DEVICE)
 
         fig, axes = plt.subplots(1, 4, figsize=(20, 5))
@@ -119,17 +123,15 @@ def generate_heatmaps():
         axes[0].axis('off')
 
         for idx, task in enumerate(tasks):
-            # Wrap the model for the specific task
             wrapped_model = TaskWrapper(base_model, task=task).to(DEVICE)
             wrapped_model.eval()
             
-            # Initialize Grad-CAM
-            cam = GradCAM(model=wrapped_model, target_layers=target_layers)
+            # 🚨 Apply the reshape_transform here!
+            cam = GradCAM(model=wrapped_model, 
+                          target_layers=target_layers, 
+                          reshape_transform=reshape_transform)
             
-            # Generate heatmap (targets highest scoring class automatically)
             grayscale_cam = cam(input_tensor=input_tensor, targets=None)[0, :]
-            
-            # Overlay heatmap on original image
             visualization = show_cam_on_image(img_plot, grayscale_cam, use_rgb=True)
             
             axes[idx+1].imshow(visualization)
