@@ -1,6 +1,6 @@
 """
-Hybrid Multi-Task Swin Transformer (Microscopy Pre-trained)
-Featuring Focal Loss (EXP) + CORAL Ordinal Loss (ICM/TE)
+Multi-Task Swin Transformer (Microscopy Pre-trained)
+Featuring "Full Focal" Architecture for Extreme Imbalance
 Final Master's Thesis Training Script
 """
 
@@ -23,13 +23,13 @@ import numpy as np
 # ============================================================
 TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"  
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
-SAVE_DIR = "/kaggle/working/saved_models/swin_hybrid"        
+SAVE_DIR = "/kaggle/working/saved_models/swin_full_focal"        
 
 MICROSCOPY_WEIGHTS_PATH = "/kaggle/input/models/ridakhan09/embryo-grading-pretrained-weights/pytorch/base-weights/1/swin_tiny_patch4_window7_224_orig_Imge_micro.pth"
 
 NUM_CLASSES_EXP = 5  
-NUM_CLASSES_ICM = 3  # A, B, C (No NA)
-NUM_CLASSES_TE = 3   # A, B, C (No NA)
+NUM_CLASSES_ICM = 3  # A, B, C 
+NUM_CLASSES_TE = 3   # A, B, C 
 
 DROPOUT_RATE = 0.3  
 BATCH_SIZE = 32
@@ -45,23 +45,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ============================================================
-# 2. HYBRID LOSS FUNCTIONS & UTILS
+# 2. FOCAL LOSS FUNCTION
 # ============================================================
-# --- CORAL Utils (For ICM & TE) ---
-def to_coral_levels(label, num_classes):
-    levels = [1] * label + [0] * (num_classes - 1 - label)
-    return torch.tensor(levels, dtype=torch.float32)
-
-class CoralLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, logits, levels):
-        val = (-torch.sum((F.logsigmoid(logits)*levels
-                      + (F.logsigmoid(logits) - logits)*(1-levels)), dim=1))
-        return torch.mean(val)
-
-# --- Focal Loss (For Expansion) ---
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1.0, gamma=2.0):
         super(FocalLoss, self).__init__()
@@ -91,7 +76,7 @@ class MultiTaskGardnerDataset(Dataset):
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
             
-            # Keep only A (0), B (1), C (2)
+            # Keep only the valid 3 classes for ICM/TE
             if col in ["ICM_silver", "TE_silver"]:
                 self.df = self.df[self.df[col] < 3].copy() 
                 
@@ -110,14 +95,13 @@ class MultiTaskGardnerDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        # 🚨 HYBRID LABELS
-        # EXP: standard integer (subtract 1 to make it 0-4 for PyTorch CrossEntropy/Focal)
+        # 🚨 FULL FOCAL LABELS: All targets must be 0-indexed integers!
         exp_val = int(row["EXP_silver"])
         l_exp = torch.tensor(exp_val - 1 if exp_val >= 1 else exp_val, dtype=torch.long)
         
-        # ICM/TE: CORAL binary vectors
-        l_icm = to_coral_levels(int(row["ICM_silver"]), NUM_CLASSES_ICM)
-        l_te = to_coral_levels(int(row["TE_silver"]), NUM_CLASSES_TE)
+        # Assuming original dataset mapped A=0, B=1, C=2
+        l_icm = torch.tensor(int(row["ICM_silver"]), dtype=torch.long)
+        l_te = torch.tensor(int(row["TE_silver"]), dtype=torch.long)
         
         return image, l_exp, l_icm, l_te
 
@@ -139,7 +123,7 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# 4. SWIN-T MODEL (HYBRID HEADS)
+# 4. SWIN-T MODEL (FULL CATEGORICAL HEADS)
 # ============================================================
 class MultiTaskMicroscopySwin(nn.Module):
     def __init__(self, weight_path, dropout_rate=0.3):
@@ -159,12 +143,10 @@ class MultiTaskMicroscopySwin(nn.Module):
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
         
-        # 🚨 HYBRID ARCHITECTURE
-        # EXP Head: outputs exactly 5 logits (for Focal Loss)
+        # 🚨 All heads now output standard NUM_CLASSES for Focal Loss
         self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
-        # ICM/TE Heads: output N-1 logits (for CORAL Loss)
-        self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM - 1, dropout_rate)
-        self.te_head = self._make_head(in_features, NUM_CLASSES_TE - 1, dropout_rate)
+        self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
+        self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
 
     def _make_head(self, in_features, out_features, dropout_rate):
         return nn.Sequential(
@@ -192,7 +174,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def train_epoch(model, loader, focal_criteria, coral_criteria, optimizer, device):
+def train_epoch(model, loader, criteria, optimizer, device):
     model.train()
     total_loss, correct_exp, correct_icm, correct_te, total = 0, 0, 0, 0, 0
     
@@ -204,10 +186,10 @@ def train_epoch(model, loader, focal_criteria, coral_criteria, optimizer, device
         optimizer.zero_grad()
         out_exp, out_icm, out_te = model(images)
         
-        # 🚨 HYBRID LOSS CALCULATION
-        loss_exp = focal_criteria(out_exp, l_exp)
-        loss_icm = coral_criteria(out_icm, l_icm)
-        loss_te  = coral_criteria(out_te, l_te)
+        # Apply Focal Loss to all heads
+        loss_exp = criteria(out_exp, l_exp)
+        loss_icm = criteria(out_icm, l_icm)
+        loss_te  = criteria(out_te, l_te)
         
         loss = loss_exp + loss_icm + loss_te
         
@@ -217,24 +199,19 @@ def train_epoch(model, loader, focal_criteria, coral_criteria, optimizer, device
         
         total_loss += loss.item() * images.size(0)
         
-        # 🚨 HYBRID DECODING
-        # Focal Loss uses Argmax
+        # Standard Argmax Decoding for all heads
         pred_exp = torch.argmax(out_exp, dim=1)
-        # CORAL uses Sigmoid Sum
-        pred_icm = (torch.sigmoid(out_icm) > 0.5).sum(dim=1)
-        pred_te = (torch.sigmoid(out_te) > 0.5).sum(dim=1)
-        
-        true_icm = l_icm.sum(dim=1)
-        true_te = l_te.sum(dim=1)
+        pred_icm = torch.argmax(out_icm, dim=1)
+        pred_te = torch.argmax(out_te, dim=1)
         
         correct_exp += (pred_exp == l_exp).sum().item()
-        correct_icm += (pred_icm == true_icm).sum().item()
-        correct_te += (pred_te == true_te).sum().item()
+        correct_icm += (pred_icm == l_icm).sum().item()
+        correct_te += (pred_te == l_te).sum().item()
         total += l_exp.size(0)
         
     return total_loss / total, (100 * correct_exp / total, 100 * correct_icm / total, 100 * correct_te / total)
 
-def validate(model, loader, focal_criteria, coral_criteria, device):
+def validate(model, loader, criteria, device):
     model.eval()
     total_loss, correct_exp, correct_icm, correct_te, total = 0, 0, 0, 0, 0
     
@@ -246,37 +223,34 @@ def validate(model, loader, focal_criteria, coral_criteria, device):
             
             out_exp, out_icm, out_te = model(images)
             
-            loss_exp = focal_criteria(out_exp, l_exp)
-            loss_icm = coral_criteria(out_icm, l_icm)
-            loss_te  = coral_criteria(out_te, l_te)
+            loss_exp = criteria(out_exp, l_exp)
+            loss_icm = criteria(out_icm, l_icm)
+            loss_te  = criteria(out_te, l_te)
             
             loss = loss_exp + loss_icm + loss_te
             total_loss += loss.item() * images.size(0)
             
             pred_exp = torch.argmax(out_exp, dim=1)
-            pred_icm = (torch.sigmoid(out_icm) > 0.5).sum(dim=1)
-            pred_te = (torch.sigmoid(out_te) > 0.5).sum(dim=1)
-            
-            true_icm = l_icm.sum(dim=1)
-            true_te = l_te.sum(dim=1)
+            pred_icm = torch.argmax(out_icm, dim=1)
+            pred_te = torch.argmax(out_te, dim=1)
             
             correct_exp += (pred_exp == l_exp).sum().item()
-            correct_icm += (pred_icm == true_icm).sum().item()
-            correct_te += (pred_te == true_te).sum().item()
+            correct_icm += (pred_icm == l_icm).sum().item()
+            correct_te += (pred_te == l_te).sum().item()
             total += l_exp.size(0)
             
     return total_loss / total, (100 * correct_exp / total, 100 * correct_icm / total, 100 * correct_te / total)
 
 def train_single_model(seed, train_loader, val_loader):
     print(f"\n{'='*70}")
-    print(f"TRAINING HYBRID SWIN-T (FOCAL + CORAL) (SEED {seed})")
+    print(f"TRAINING FULL FOCAL SWIN-T (SEED {seed})")
     print(f"{'='*70}\n")
     
     set_seed(seed)
     model = MultiTaskMicroscopySwin(MICROSCOPY_WEIGHTS_PATH, DROPOUT_RATE).to(DEVICE)
     
-    focal_criteria = FocalLoss(gamma=2.0)
-    coral_criteria = CoralLoss()
+    # Gamma=2.0 massively boosts the penalty for missing Grade B and C
+    focal_criteria = FocalLoss(gamma=2.0) 
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
@@ -286,8 +260,8 @@ def train_single_model(seed, train_loader, val_loader):
     patience_counter = 0
     
     for epoch in range(EPOCHS):
-        t_loss, (t_exp, t_icm, t_te) = train_epoch(model, train_loader, focal_criteria, coral_criteria, optimizer, DEVICE)
-        v_loss, (v_exp, v_icm, v_te) = validate(model, val_loader, focal_criteria, coral_criteria, DEVICE)
+        t_loss, (t_exp, t_icm, t_te) = train_epoch(model, train_loader, focal_criteria, optimizer, DEVICE)
+        v_loss, (v_exp, v_icm, v_te) = validate(model, val_loader, focal_criteria, DEVICE)
         
         avg_val_acc = (v_exp + v_icm + v_te) / 3.0
         
@@ -300,7 +274,7 @@ def train_single_model(seed, train_loader, val_loader):
             best_avg_acc = avg_val_acc
             best_epoch = epoch + 1
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"swin_hybrid_seed{seed}_best.pth"))
+            torch.save(model.state_dict(), os.path.join(SAVE_DIR, f"swin_focal_seed{seed}_best.pth"))
             print(f"   🎯 New best average accuracy! (saved)")
         else:
             patience_counter += 1
@@ -324,7 +298,6 @@ def main():
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
     
-    # Restored standard DataLoaders (Sampler removed to avoid Transformer poisoning)
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
