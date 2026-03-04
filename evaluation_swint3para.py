@@ -1,12 +1,12 @@
 """
-Multi-Task Evaluation & Uncertainty Visualization
-Generates Confusion Matrices, QWK Scores, and Uncertainty Plots for Journal Publication
+Swin-T Evaluation Script (CORAL Outputs & MC Dropout)
+Final Master's Thesis Evaluation Script
 """
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from torchvision.models import swin_t, Swin_T_Weights
+from torchvision.models import swin_t
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
@@ -15,94 +15,89 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score
+from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score, precision_recall_fscore_support
+import scipy.stats
 
 # ============================================================
-# CONFIGURATION - UPDATE THESE PATHS
+# 1. CONFIGURATION
 # ============================================================
-# 🚨 UPDATE THIS PATH to your actual test dataset (CSV or Excel)
-TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xlsx"  
+TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xlsx"
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 
-# This should point to the exact file saved in the previous step
-MODEL_PATH = "/kaggle/working/saved_models/multitask/multitask_seed42_best.pth" 
-OUTPUT_DIR = "/kaggle/working/evaluation_plots"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 16
-MC_SAMPLES = 20  # Number of forward passes for uncertainty estimation
+# 🚨 VERIFY THIS PATH MATCHES YOUR SAVED EPOCH 18 MODEL
+MODEL_PATH = "/kaggle/working/saved_models/swin_microscopy_coral/swin_coral_seed42_best.pth"
+SAVE_DIR = "/kaggle/working/evaluation_plots_swin_coral"
 
 NUM_CLASSES_EXP = 5  
-NUM_CLASSES_ICM = 4  
-NUM_CLASSES_TE = 4   
+NUM_CLASSES_ICM = 3  # 3-Class logic enforced (No NA)
+NUM_CLASSES_TE = 3   # 3-Class logic enforced (No NA)
 
-# Clinical Mappings for the Confusion Matrices
-EXP_MAP = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5'}
-ICM_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
-TE_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
+DROPOUT_RATE = 0.3  
+BATCH_SIZE = 1  
+MC_PASSES = 20
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ============================================================
-# DATASET (UPDATED FOR GOLD LABELS - EXPLICIT FIX)
+# 2. DATASET (3-Class Enforced)
 # ============================================================
-class TestGardnerDataset(Dataset):
-    def __init__(self, data_path, img_folder, transform=None):
-        print(f"Loading Test Data: {data_path}...")
-        
-        # Load the file
-        if data_path.endswith('.csv'):
-            self.df = pd.read_csv(data_path, sep=';')
-        else:
-            self.df = pd.read_excel(data_path)
-            
-        # Strip invisible spaces from column names (Very common in Excel)
-        self.df.columns = self.df.columns.str.strip()
-        
+class GardnerTestDataset(Dataset):
+    def __init__(self, excel_file, img_folder, transform=None):
+        print(f"Loading Test Data: {excel_file}...")
+        self.df = pd.read_excel(excel_file)
         self.img_folder = img_folder
         self.transform = transform
         
-        # We know these are the exact names from your print statement
         self.targets = ["EXP_gold", "ICM_gold", "TE_gold"]
         
-        # Verify columns exist
-        for col in self.targets:
-            if col not in self.df.columns:
-                raise KeyError(f"CRITICAL: '{col}' not found in dataframe columns: {self.df.columns.tolist()}")
-        
-        # Filter valid samples
         for col in self.targets:
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
+            
+            if col in ["ICM_gold", "TE_gold"]:
+                self.df = self.df[self.df[col] < 3].copy() 
+                
             self.df = self.df[self.df[col].notna()].copy()
             
-        print(f"Total test samples ready for evaluation: {len(self.df)}")
-
-    def __len__(self): return len(self.df)
-
+    def __len__(self):
+        return len(self.df)
+    
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        img_path = os.path.join(self.img_folder, row['Image'])
-        image = Image.open(img_path).convert('RGB')
-        if self.transform: image = self.transform(image)
+        img_path = os.path.join(self.img_folder, str(row['Image']))
         
-        # Double check we are using the gold strings here
-        return image, row["EXP_gold"], row["ICM_gold"], row["TE_gold"]
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+            
+        l_exp = row["EXP_gold"]
+        l_icm = row["ICM_gold"]
+        l_te = row["TE_gold"]
+        
+        return image, l_exp, l_icm, l_te
+
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-class MultiTaskSwinWithUncertainty(nn.Module):
-    def __init__(self, dropout_rate=0.3):
+# ============================================================
+# 3. SWIN-T ARCHITECTURE
+# ============================================================
+class MultiTaskMicroscopySwin(nn.Module):
+    def __init__(self, weight_path="", dropout_rate=0.3):
         super().__init__()
-        self.backbone = swin_t(weights=None) # Don't need pretrained weights for evaluation
+        self.backbone = swin_t(weights=None) 
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
-        self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
-        self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
-        self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
+        
+        # Heads structured for CORAL (N-1 outputs)
+        self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP - 1, dropout_rate)
+        self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM - 1, dropout_rate)
+        self.te_head = self._make_head(in_features, NUM_CLASSES_TE - 1, dropout_rate)
 
     def _make_head(self, in_features, out_features, dropout_rate):
         return nn.Sequential(
@@ -118,142 +113,149 @@ class MultiTaskSwinWithUncertainty(nn.Module):
     def forward(self, x):
         features = self.backbone(x)
         return self.exp_head(features), self.icm_head(features), self.te_head(features)
-    
+
     def enable_dropout(self):
         for module in self.modules():
             if isinstance(module, nn.Dropout):
                 module.train()
 
 # ============================================================
-# EVALUATION & UNCERTAINTY LOGIC
+# 4. CORAL TO PROBABILITY & UNCERTAINTY UTILS
 # ============================================================
-def evaluate_mc_dropout(model, dataloader):
-    model.eval()
-    model.enable_dropout() # Turn dropout ON for inference
+def coral_logits_to_probs(logits):
+    """Converts CORAL cumulative logits back into standard class probabilities"""
+    cum_probs = torch.sigmoid(logits)
+    ones = torch.ones((logits.size(0), 1), device=logits.device)
+    zeros = torch.zeros((logits.size(0), 1), device=logits.device)
+    padded = torch.cat([ones, cum_probs, zeros], dim=1)
     
-    results = {
-        'exp': {'true': [], 'pred': [], 'entropy': []},
-        'icm': {'true': [], 'pred': [], 'entropy': []},
-        'te':  {'true': [], 'pred': [], 'entropy': []}
-    }
+    probs = padded[:, :-1] - padded[:, 1:]
+    probs = torch.clamp(probs, min=1e-7) 
+    probs = probs / probs.sum(dim=1, keepdim=True)
+    return probs
+
+def calculate_entropy(preds):
+    mean_preds = np.mean(preds, axis=0)[0]
+    entropy = scipy.stats.entropy(mean_preds)
+    return mean_preds, entropy
+
+def predict_with_uncertainty_coral(model, image, passes=MC_PASSES):
+    model.eval()
+    model.enable_dropout() 
+    
+    exp_preds, icm_preds, te_preds = [], [], []
     
     with torch.no_grad():
-        for images, l_exp, l_icm, l_te in tqdm(dataloader, desc="Running MC Dropout"):
-            images = images.to(DEVICE)
+        for _ in range(passes):
+            out_exp, out_icm, out_te = model(image)
             
-            # Store predictions for all MC samples
-            batch_probs_exp = []
-            batch_probs_icm = []
-            batch_probs_te = []
+            # Convert logits to probabilities
+            exp_probs = coral_logits_to_probs(out_exp)
+            icm_probs = coral_logits_to_probs(out_icm)
+            te_probs = coral_logits_to_probs(out_te)
             
-            for _ in range(MC_SAMPLES):
-                o_exp, o_icm, o_te = model(images)
-                batch_probs_exp.append(torch.softmax(o_exp, dim=1))
-                batch_probs_icm.append(torch.softmax(o_icm, dim=1))
-                batch_probs_te.append(torch.softmax(o_te, dim=1))
-                
-            # Calculate Mean and Entropy for EXP
-            mean_exp = torch.stack(batch_probs_exp).mean(dim=0)
-            ent_exp = -torch.sum(mean_exp * torch.log(mean_exp + 1e-10), dim=1)
-            pred_exp = torch.argmax(mean_exp, dim=1)
+            exp_preds.append(exp_probs.cpu().numpy())
+            icm_preds.append(icm_probs.cpu().numpy())
+            te_preds.append(te_probs.cpu().numpy())
             
-            # Calculate Mean and Entropy for ICM
-            mean_icm = torch.stack(batch_probs_icm).mean(dim=0)
-            ent_icm = -torch.sum(mean_icm * torch.log(mean_icm + 1e-10), dim=1)
-            pred_icm = torch.argmax(mean_icm, dim=1)
-            
-            # Calculate Mean and Entropy for TE
-            mean_te = torch.stack(batch_probs_te).mean(dim=0)
-            ent_te = -torch.sum(mean_te * torch.log(mean_te + 1e-10), dim=1)
-            pred_te = torch.argmax(mean_te, dim=1)
-            
-            # Save results
-            results['exp']['true'].extend(l_exp.cpu().numpy())
-            results['exp']['pred'].extend(pred_exp.cpu().numpy())
-            results['exp']['entropy'].extend(ent_exp.cpu().numpy())
-            
-            results['icm']['true'].extend(l_icm.cpu().numpy())
-            results['icm']['pred'].extend(pred_icm.cpu().numpy())
-            results['icm']['entropy'].extend(ent_icm.cpu().numpy())
-            
-            results['te']['true'].extend(l_te.cpu().numpy())
-            results['te']['pred'].extend(pred_te.cpu().numpy())
-            results['te']['entropy'].extend(ent_te.cpu().numpy())
-            
-    return results
+    exp_preds = np.stack(exp_preds)
+    icm_preds = np.stack(icm_preds)
+    te_preds = np.stack(te_preds)
+    
+    exp_mean, exp_ent = calculate_entropy(exp_preds)
+    icm_mean, icm_ent = calculate_entropy(icm_preds)
+    te_mean, te_ent = calculate_entropy(te_preds)
+    
+    return (np.argmax(exp_mean), exp_ent), (np.argmax(icm_mean), icm_ent), (np.argmax(te_mean), te_ent)
 
-# ============================================================
-# VISUALIZATION FUNCTIONS
-# ============================================================
-def plot_clinical_confusion_matrix(y_true, y_pred, mapping, title, filename):
+def plot_confusion_matrix(y_true, y_pred, classes, title, filename):
     cm = confusion_matrix(y_true, y_pred)
-    labels = [mapping[i] for i in range(len(mapping))]
-    
     plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
-    plt.title(f'Confusion Matrix: {title}')
-    plt.ylabel('True Clinical Grade')
-    plt.xlabel('AI Predicted Grade')
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+    plt.title(title)
+    plt.ylabel('True Grade')
+    plt.xlabel('Predicted Grade')
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, filename))
-    plt.close()
-
-def plot_uncertainty_histogram(y_true, y_pred, entropies, title, filename):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    entropies = np.array(entropies)
-    
-    correct_mask = (y_true == y_pred)
-    incorrect_mask = (y_true != y_pred)
-    
-    plt.figure(figsize=(10, 6))
-    sns.histplot(entropies[correct_mask], color='green', alpha=0.5, label='Correct Predictions', stat='density', bins=20)
-    sns.histplot(entropies[incorrect_mask], color='red', alpha=0.5, label='Incorrect Predictions', stat='density', bins=20)
-    plt.title(f'MC Dropout Uncertainty (Entropy) Distribution: {title}')
-    plt.xlabel('Predictive Entropy (Higher = More Uncertain)')
-    plt.ylabel('Density')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, filename))
+    plt.savefig(os.path.join(SAVE_DIR, filename), dpi=300)
     plt.close()
 
 # ============================================================
-# MAIN EXECUTION
+# 5. MAIN EVALUATION LOOP
 # ============================================================
-def main():
-    print("Loading Model...")
-    model = MultiTaskSwinWithUncertainty().to(DEVICE)
+def evaluate_mc_dropout():
+    print("Loading Model for Evaluation...")
+    model = MultiTaskMicroscopySwin(dropout_rate=DROPOUT_RATE).to(DEVICE)
+    
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ ERROR: Could not find model at {MODEL_PATH}")
+        return
+        
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.eval()
     
-    print("Loading Test Data...")
-    test_ds = TestGardnerDataset(TEST_DATA_PATH, IMG_FOLDER, transform=val_transform)
+    test_ds = GardnerTestDataset(TEST_DATA_PATH, IMG_FOLDER, transform=val_transform)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
     
-    print(f"Running MC Dropout Inference ({MC_SAMPLES} passes per image)...")
-    res = evaluate_mc_dropout(model, test_loader)
+    all_exp_true, all_exp_pred = [], []
+    all_icm_true, all_icm_pred = [], []
+    all_te_true, all_te_pred = [], []
     
-    print("\n" + "="*50)
-    print("FINAL CLINICAL METRICS (JOURNAL READY)")
-    print("="*50)
+    print(f"Running MC Dropout Inference ({MC_PASSES} passes per image)...")
+    for image, l_exp, l_icm, l_te in tqdm(test_loader, desc="Evaluating"):
+        image = image.to(DEVICE)
+        
+        (p_exp, _), (p_icm, _), (p_te, _) = predict_with_uncertainty_coral(model, image)
+        
+        all_exp_true.append(l_exp.item())
+        all_exp_pred.append(p_exp)
+        
+        all_icm_true.append(l_icm.item())
+        all_icm_pred.append(p_icm)
+        
+        all_te_true.append(l_te.item())
+        all_te_pred.append(p_te)
+
+    # ---------------------------------------------------------
+    # CALCULATE METRICS
+    # ---------------------------------------------------------
+    exp_acc = accuracy_score(all_exp_true, all_exp_pred)
+    exp_qwk = cohen_kappa_score(all_exp_true, all_exp_pred, weights='quadratic')
     
-    for task, mapping, name in [('exp', EXP_MAP, 'Expansion'), ('icm', ICM_MAP, 'ICM'), ('te', TE_MAP, 'TE')]:
-        y_true = res[task]['true']
-        y_pred = res[task]['pred']
-        
-        acc = accuracy_score(y_true, y_pred) * 100
-        # Quadratic Weighted Kappa - The Gold Standard for Ordinal Medical Grading
-        qwk = cohen_kappa_score(y_true, y_pred, weights='quadratic')
-        
-        print(f"\n{name.upper()} RESULTS:")
-        print(f"  Accuracy: {acc:.2f}%")
-        print(f"  Quadratic Weighted Kappa (QWK): {qwk:.4f}")
-        
-        # Generate and save plots
-        plot_clinical_confusion_matrix(y_true, y_pred, mapping, name, f'cm_{name.lower()}.png')
-        plot_uncertainty_histogram(y_true, y_pred, res[task]['entropy'], name, f'uncertainty_{name.lower()}.png')
-        
-    print(f"\n✅ All graphs saved successfully to: {OUTPUT_DIR}")
-    print("Check the Kaggle file explorer on the right to download your .png files for your paper!")
+    icm_acc = accuracy_score(all_icm_true, all_icm_pred)
+    icm_qwk = cohen_kappa_score(all_icm_true, all_icm_pred, weights='quadratic')
+    
+    te_acc = accuracy_score(all_te_true, all_te_pred)
+    te_qwk = cohen_kappa_score(all_te_true, all_te_pred, weights='quadratic')
+
+    exp_prec, exp_rec, _, _ = precision_recall_fscore_support(all_exp_true, all_exp_pred, average='macro', zero_division=0)
+    icm_prec, icm_rec, _, _ = precision_recall_fscore_support(all_icm_true, all_icm_pred, average='macro', zero_division=0)
+    te_prec, te_rec, _, _ = precision_recall_fscore_support(all_te_true, all_te_pred, average='macro', zero_division=0)
+
+    print("\n==================================================")
+    print("FINAL CLINICAL METRICS (SWIN-T + CORAL)")
+    print("==================================================")
+    print("\nEXPANSION RESULTS:")
+    print(f"  Accuracy: {exp_acc*100:.2f}% | QWK: {exp_qwk:.4f}")
+    
+    print("\nICM RESULTS:")
+    print(f"  Accuracy: {icm_acc*100:.2f}% | QWK: {icm_qwk:.4f}")
+    
+    print("\nTE RESULTS:")
+    print(f"  Accuracy: {te_acc*100:.2f}% | QWK: {te_qwk:.4f}")
+
+    print("\n==================================================")
+    print("MACRO-AVERAGED METRICS")
+    print("==================================================")
+    print(f"EXP - Precision: {exp_prec*100:.2f}% | Recall: {exp_rec*100:.2f}%")
+    print(f"ICM - Precision: {icm_prec*100:.2f}% | Recall: {icm_rec*100:.2f}%")
+    print(f"TE  - Precision: {te_prec*100:.2f}% | Recall: {te_rec*100:.2f}%")
+    print("==================================================\n")
+
+    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Swin-T CORAL - Expansion', 'cm_exp_swin.png')
+    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Swin-T CORAL - ICM', 'cm_icm_swin.png')
+    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Swin-T CORAL - TE', 'cm_te_swin.png')
+    
+    print(f"✅ All evaluation plots saved successfully to: {SAVE_DIR}")
 
 if __name__ == "__main__":
-    main()
+    evaluate_mc_dropout()
