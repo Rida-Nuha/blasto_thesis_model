@@ -1,7 +1,7 @@
 """
 Multi-Task Swin Transformer (Microscopy Pre-trained)
 Featuring "Full Focal" Architecture for Extreme Imbalance
-Final Master's Thesis Training Script
+Final Champion Master's Thesis Training Script
 """
 
 import torch
@@ -23,8 +23,9 @@ import numpy as np
 # ============================================================
 TRAIN_CSV = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_train_silver.csv"  
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"            
-SAVE_DIR = "/kaggle/working/saved_models/swin_full_focal"        
+SAVE_DIR = "/kaggle/working/saved_models/swin_focal_champion"        
 
+# 🚨 VERIFY YOUR MICROSCOPY WEIGHTS KAGGLE PATH HERE
 MICROSCOPY_WEIGHTS_PATH = "/kaggle/input/models/ridakhan09/embryo-grading-pretrained-weights/pytorch/base-weights/1/swin_tiny_patch4_window7_224_orig_Imge_micro.pth"
 
 NUM_CLASSES_EXP = 5  
@@ -51,7 +52,7 @@ class FocalLoss(nn.Module):
     def __init__(self, alpha=1.0, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
-        self.gamma = gamma
+        self.gamma = gamma # Gamma=2 strongly penalizes majority class guessing
 
     def forward(self, inputs, targets):
         ce_loss = F.cross_entropy(inputs, targets, reduction='none')
@@ -123,7 +124,7 @@ val_transform = transforms.Compose([
 ])
 
 # ============================================================
-# 4. SWIN-T MODEL (FULL CATEGORICAL HEADS)
+# 4. SWIN-T MODEL (CATEGORICAL HEADS)
 # ============================================================
 class MultiTaskMicroscopySwin(nn.Module):
     def __init__(self, weight_path, dropout_rate=0.3):
@@ -135,6 +136,7 @@ class MultiTaskMicroscopySwin(nn.Module):
             checkpoint = torch.load(weight_path, map_location='cpu', weights_only=False)
             
             state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+            # Strip the old heads to avoid dimension mismatch
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith('head.')}
             self.backbone.load_state_dict(state_dict, strict=False)
         else:
@@ -143,7 +145,7 @@ class MultiTaskMicroscopySwin(nn.Module):
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
         
-        # 🚨 All heads now output standard NUM_CLASSES for Focal Loss
+        # Standard categorical outputs for Focal Loss
         self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
         self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
         self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
@@ -192,14 +194,14 @@ def train_epoch(model, loader, criteria, optimizer, device):
         loss_te  = criteria(out_te, l_te)
         
         loss = loss_exp + loss_icm + loss_te
-        
         loss.backward()
+        
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         total_loss += loss.item() * images.size(0)
         
-        # Standard Argmax Decoding for all heads
+        # Standard Argmax Decoding
         pred_exp = torch.argmax(out_exp, dim=1)
         pred_icm = torch.argmax(out_icm, dim=1)
         pred_te = torch.argmax(out_te, dim=1)
@@ -243,13 +245,12 @@ def validate(model, loader, criteria, device):
 
 def train_single_model(seed, train_loader, val_loader):
     print(f"\n{'='*70}")
-    print(f"TRAINING FULL FOCAL SWIN-T (SEED {seed})")
+    print(f"TRAINING SWIN-T WITH FULL FOCAL LOSS (SEED {seed})")
     print(f"{'='*70}\n")
     
     set_seed(seed)
     model = MultiTaskMicroscopySwin(MICROSCOPY_WEIGHTS_PATH, DROPOUT_RATE).to(DEVICE)
     
-    # Gamma=2.0 massively boosts the penalty for missing Grade B and C
     focal_criteria = FocalLoss(gamma=2.0) 
     
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
@@ -298,6 +299,7 @@ def main():
     train_ds.dataset.transform = train_transform
     val_ds.dataset.transform = val_transform
     
+    # Standard DataLoaders - No samplers required!
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS)
     
