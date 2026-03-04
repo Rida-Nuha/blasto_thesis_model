@@ -1,12 +1,14 @@
 """
-Multi-Task Evaluation & Uncertainty Visualization
-Generates Confusion Matrices, QWK Scores, and Uncertainty Plots for Journal Publication
+Multi-Task Swin Transformer Evaluation Script
+Standard Categorical Outputs with MC Dropout Uncertainty
+Final Champion Baseline Evaluation
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torchvision.models import swin_t, Swin_T_Weights
+from torchvision.models import swin_t
 from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
@@ -15,65 +17,70 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score
+from sklearn.metrics import confusion_matrix, cohen_kappa_score, accuracy_score, precision_recall_fscore_support
+import scipy.stats
 
 # ============================================================
-# CONFIGURATION - UPDATE THESE PATHS
+# 1. CONFIGURATION
 # ============================================================
-# 🚨 UPDATE THIS PATH to your actual test dataset (CSV or Excel)
-TEST_DATA_PATH = "/kaggle/input/dataset/Gardner_test_silver.csv"  
-IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
+TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xlsx"
+IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 
-# This should point to the exact file saved in the previous step
-MODEL_PATH = "/kaggle/working/saved_models/swin_focal_champion/swin_focal_seed42_best.pth" 
-OUTPUT_DIR = "/kaggle/working/evaluation_plots"
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 16
-MC_SAMPLES = 20  # Number of forward passes for uncertainty estimation
+# 🚨 VERIFY THIS MATCHES YOUR SAVED CHAMPION MODEL
+MODEL_PATH = "/kaggle/working/saved_models/swin_champion_baseline/multitask_seed42_best.pth"
+SAVE_DIR = "/kaggle/working/evaluation_plots_swintmodel_baseline"
 
 NUM_CLASSES_EXP = 5  
-NUM_CLASSES_ICM = 4  
-NUM_CLASSES_TE = 4   
+NUM_CLASSES_ICM = 3  
+NUM_CLASSES_TE = 3   
 
-# Clinical Mappings for the Confusion Matrices
-EXP_MAP = {0: '1', 1: '2', 2: '3', 3: '4', 4: '5'}
-ICM_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
-TE_MAP = {0: 'A', 1: 'B', 2: 'C', 3: 'ND'}
+DROPOUT_RATE = 0.3  
+BATCH_SIZE = 1  
+MC_PASSES = 20
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ============================================================
-# DATASET & MODEL (Re-declared to load properly)
+# 2. DATASET (Strict 3-Class Enforced)
 # ============================================================
-class TestGardnerDataset(Dataset):
-    def __init__(self, data_path, img_folder, transform=None):
-        print(f"Loading Test Data: {data_path}...")
-        # Automatically handle CSV or Excel
-        if data_path.endswith('.csv'):
-            self.df = pd.read_csv(data_path, sep=';')
-        else:
-            self.df = pd.read_excel(data_path)
-            
+class GardnerTestDataset(Dataset):
+    def __init__(self, excel_file, img_folder, transform=None):
+        print(f"Loading Test Data: {excel_file}...")
+        self.df = pd.read_excel(excel_file)
         self.img_folder = img_folder
         self.transform = transform
-        self.targets = ["EXP_silver", "ICM_silver", "TE_silver"]
+        
+        self.targets = ["EXP_gold", "ICM_gold", "TE_gold"]
         
         for col in self.targets:
             valid_mask = (self.df[col].notna()) & (self.df[col] != 'ND') & (self.df[col] != 'NA')
             self.df = self.df[valid_mask].copy()
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').astype(int)
+            
+            # 🚨 STRICT FILTER: Drop anything >= 3 for ICM and TE
+            if col in ["ICM_gold", "TE_gold"]:
+                self.df = self.df[self.df[col] < 3].copy() 
+                
             self.df = self.df[self.df[col].notna()].copy()
             
-        print(f"Total test samples: {len(self.df)}")
-
-    def __len__(self): return len(self.df)
-
+    def __len__(self):
+        return len(self.df)
+    
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        img_path = os.path.join(self.img_folder, row['Image'])
+        img_path = os.path.join(self.img_folder, str(row['Image']))
+        
         image = Image.open(img_path).convert('RGB')
-        if self.transform: image = self.transform(image)
-        return image, row["EXP_silver"], row["ICM_silver"], row["TE_silver"]
+        if self.transform:
+            image = self.transform(image)
+            
+        # Keep raw labels for the true targets (e.g., EXP remains 1-5)
+        l_exp = int(row["EXP_gold"])
+        l_icm = int(row["ICM_gold"])
+        l_te = int(row["TE_gold"])
+        
+        return image, l_exp, l_icm, l_te
 
 val_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -81,12 +88,17 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
+# ============================================================
+# 3. SWIN-T ARCHITECTURE
+# ============================================================
 class MultiTaskSwinWithUncertainty(nn.Module):
     def __init__(self, dropout_rate=0.3):
         super().__init__()
-        self.backbone = swin_t(weights=None) # Don't need pretrained weights for evaluation
+        # We don't need to load ImageNet weights for evaluation, just the architecture
+        self.backbone = swin_t(weights=None)
         in_features = self.backbone.head.in_features
         self.backbone.head = nn.Identity()
+        
         self.exp_head = self._make_head(in_features, NUM_CLASSES_EXP, dropout_rate)
         self.icm_head = self._make_head(in_features, NUM_CLASSES_ICM, dropout_rate)
         self.te_head = self._make_head(in_features, NUM_CLASSES_TE, dropout_rate)
@@ -105,142 +117,142 @@ class MultiTaskSwinWithUncertainty(nn.Module):
     def forward(self, x):
         features = self.backbone(x)
         return self.exp_head(features), self.icm_head(features), self.te_head(features)
-    
+
     def enable_dropout(self):
+        """Forces dropout to remain active during evaluation for MC Uncertainty"""
         for module in self.modules():
             if isinstance(module, nn.Dropout):
                 module.train()
 
 # ============================================================
-# EVALUATION & UNCERTAINTY LOGIC
+# 4. PREDICTION & UNCERTAINTY UTILS
 # ============================================================
-def evaluate_mc_dropout(model, dataloader):
+def calculate_entropy(preds):
+    mean_preds = np.mean(preds, axis=0)[0]
+    entropy = scipy.stats.entropy(mean_preds)
+    return mean_preds, entropy
+
+def predict_with_uncertainty(model, image, passes=MC_PASSES):
     model.eval()
-    model.enable_dropout() # Turn dropout ON for inference
+    model.enable_dropout() 
     
-    results = {
-        'exp': {'true': [], 'pred': [], 'entropy': []},
-        'icm': {'true': [], 'pred': [], 'entropy': []},
-        'te':  {'true': [], 'pred': [], 'entropy': []}
-    }
+    exp_preds, icm_preds, te_preds = [], [], []
     
     with torch.no_grad():
-        for images, l_exp, l_icm, l_te in tqdm(dataloader, desc="Running MC Dropout"):
-            images = images.to(DEVICE)
+        for _ in range(passes):
+            out_exp, out_icm, out_te = model(image)
             
-            # Store predictions for all MC samples
-            batch_probs_exp = []
-            batch_probs_icm = []
-            batch_probs_te = []
+            # Standard Softmax for categorical outputs
+            exp_probs = F.softmax(out_exp, dim=1)
+            icm_probs = F.softmax(out_icm, dim=1)
+            te_probs = F.softmax(out_te, dim=1)
             
-            for _ in range(MC_SAMPLES):
-                o_exp, o_icm, o_te = model(images)
-                batch_probs_exp.append(torch.softmax(o_exp, dim=1))
-                batch_probs_icm.append(torch.softmax(o_icm, dim=1))
-                batch_probs_te.append(torch.softmax(o_te, dim=1))
-                
-            # Calculate Mean and Entropy for EXP
-            mean_exp = torch.stack(batch_probs_exp).mean(dim=0)
-            ent_exp = -torch.sum(mean_exp * torch.log(mean_exp + 1e-10), dim=1)
-            pred_exp = torch.argmax(mean_exp, dim=1)
+            exp_preds.append(exp_probs.cpu().numpy())
+            icm_preds.append(icm_probs.cpu().numpy())
+            te_preds.append(te_probs.cpu().numpy())
             
-            # Calculate Mean and Entropy for ICM
-            mean_icm = torch.stack(batch_probs_icm).mean(dim=0)
-            ent_icm = -torch.sum(mean_icm * torch.log(mean_icm + 1e-10), dim=1)
-            pred_icm = torch.argmax(mean_icm, dim=1)
-            
-            # Calculate Mean and Entropy for TE
-            mean_te = torch.stack(batch_probs_te).mean(dim=0)
-            ent_te = -torch.sum(mean_te * torch.log(mean_te + 1e-10), dim=1)
-            pred_te = torch.argmax(mean_te, dim=1)
-            
-            # Save results
-            results['exp']['true'].extend(l_exp.cpu().numpy())
-            results['exp']['pred'].extend(pred_exp.cpu().numpy())
-            results['exp']['entropy'].extend(ent_exp.cpu().numpy())
-            
-            results['icm']['true'].extend(l_icm.cpu().numpy())
-            results['icm']['pred'].extend(pred_icm.cpu().numpy())
-            results['icm']['entropy'].extend(ent_icm.cpu().numpy())
-            
-            results['te']['true'].extend(l_te.cpu().numpy())
-            results['te']['pred'].extend(pred_te.cpu().numpy())
-            results['te']['entropy'].extend(ent_te.cpu().numpy())
-            
-    return results
+    exp_preds = np.stack(exp_preds)
+    icm_preds = np.stack(icm_preds)
+    te_preds = np.stack(te_preds)
+    
+    exp_mean, exp_ent = calculate_entropy(exp_preds)
+    icm_mean, icm_ent = calculate_entropy(icm_preds)
+    te_mean, te_ent = calculate_entropy(te_preds)
+    
+    return (np.argmax(exp_mean), exp_ent), (np.argmax(icm_mean), icm_ent), (np.argmax(te_mean), te_ent)
 
-# ============================================================
-# VISUALIZATION FUNCTIONS
-# ============================================================
-def plot_clinical_confusion_matrix(y_true, y_pred, mapping, title, filename):
+def plot_confusion_matrix(y_true, y_pred, classes, title, filename):
     cm = confusion_matrix(y_true, y_pred)
-    labels = [mapping[i] for i in range(len(mapping))]
-    
     plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=labels, yticklabels=labels)
-    plt.title(f'Confusion Matrix: {title}')
-    plt.ylabel('True Clinical Grade')
-    plt.xlabel('AI Predicted Grade')
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+    plt.title(title)
+    plt.ylabel('True Grade')
+    plt.xlabel('Predicted Grade')
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, filename))
-    plt.close()
-
-def plot_uncertainty_histogram(y_true, y_pred, entropies, title, filename):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    entropies = np.array(entropies)
-    
-    correct_mask = (y_true == y_pred)
-    incorrect_mask = (y_true != y_pred)
-    
-    plt.figure(figsize=(10, 6))
-    sns.histplot(entropies[correct_mask], color='green', alpha=0.5, label='Correct Predictions', stat='density', bins=20)
-    sns.histplot(entropies[incorrect_mask], color='red', alpha=0.5, label='Incorrect Predictions', stat='density', bins=20)
-    plt.title(f'MC Dropout Uncertainty (Entropy) Distribution: {title}')
-    plt.xlabel('Predictive Entropy (Higher = More Uncertain)')
-    plt.ylabel('Density')
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, filename))
+    plt.savefig(os.path.join(SAVE_DIR, filename), dpi=300)
     plt.close()
 
 # ============================================================
-# MAIN EXECUTION
+# 5. MAIN EVALUATION LOOP
 # ============================================================
-def main():
-    print("Loading Model...")
-    model = MultiTaskSwinWithUncertainty().to(DEVICE)
+def evaluate_mc_dropout():
+    print("Loading Champion Swin-T Baseline Model for Evaluation...")
+    model = MultiTaskSwinWithUncertainty(dropout_rate=DROPOUT_RATE).to(DEVICE)
+    
+    if not os.path.exists(MODEL_PATH):
+        print(f"❌ ERROR: Could not find model at {MODEL_PATH}")
+        return
+        
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.eval()
     
-    print("Loading Test Data...")
-    test_ds = TestGardnerDataset(TEST_DATA_PATH, IMG_FOLDER, transform=val_transform)
+    test_ds = GardnerTestDataset(TEST_DATA_PATH, IMG_FOLDER, transform=val_transform)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
     
-    print(f"Running MC Dropout Inference ({MC_SAMPLES} passes per image)...")
-    res = evaluate_mc_dropout(model, test_loader)
+    all_exp_true, all_exp_pred = [], []
+    all_icm_true, all_icm_pred = [], []
+    all_te_true, all_te_pred = [], []
     
-    print("\n" + "="*50)
-    print("FINAL CLINICAL METRICS (JOURNAL READY)")
-    print("="*50)
+    print(f"Running MC Dropout Inference ({MC_PASSES} passes per image)...")
+    for image, l_exp, l_icm, l_te in tqdm(test_loader, desc="Evaluating"):
+        image = image.to(DEVICE)
+        
+        (p_exp, _), (p_icm, _), (p_te, _) = predict_with_uncertainty(model, image)
+        
+        # 🚨 FORMAT FIX: The model predicts 0-4 for EXP, but true dataset labels are 1-5. 
+        # Add 1 to the prediction so it matches the raw dataset label for metric calculation!
+        pred_exp_val = p_exp + 1 
+        
+        all_exp_true.append(l_exp.item())
+        all_exp_pred.append(pred_exp_val)
+        
+        all_icm_true.append(l_icm.item())
+        all_icm_pred.append(p_icm)
+        
+        all_te_true.append(l_te.item())
+        all_te_pred.append(p_te)
+
+    # ---------------------------------------------------------
+    # CALCULATE METRICS
+    # ---------------------------------------------------------
+    exp_acc = accuracy_score(all_exp_true, all_exp_pred)
+    exp_qwk = cohen_kappa_score(all_exp_true, all_exp_pred, weights='quadratic')
     
-    for task, mapping, name in [('exp', EXP_MAP, 'Expansion'), ('icm', ICM_MAP, 'ICM'), ('te', TE_MAP, 'TE')]:
-        y_true = res[task]['true']
-        y_pred = res[task]['pred']
-        
-        acc = accuracy_score(y_true, y_pred) * 100
-        # Quadratic Weighted Kappa - The Gold Standard for Ordinal Medical Grading
-        qwk = cohen_kappa_score(y_true, y_pred, weights='quadratic')
-        
-        print(f"\n{name.upper()} RESULTS:")
-        print(f"  Accuracy: {acc:.2f}%")
-        print(f"  Quadratic Weighted Kappa (QWK): {qwk:.4f}")
-        
-        # Generate and save plots
-        plot_clinical_confusion_matrix(y_true, y_pred, mapping, name, f'cm_{name.lower()}.png')
-        plot_uncertainty_histogram(y_true, y_pred, res[task]['entropy'], name, f'uncertainty_{name.lower()}.png')
-        
-    print(f"\n✅ All graphs saved successfully to: {OUTPUT_DIR}")
-    print("Check the Kaggle file explorer on the right to download your .png files for your paper!")
+    icm_acc = accuracy_score(all_icm_true, all_icm_pred)
+    icm_qwk = cohen_kappa_score(all_icm_true, all_icm_pred, weights='quadratic')
+    
+    te_acc = accuracy_score(all_te_true, all_te_pred)
+    te_qwk = cohen_kappa_score(all_te_true, all_te_pred, weights='quadratic')
+
+    exp_prec, exp_rec, _, _ = precision_recall_fscore_support(all_exp_true, all_exp_pred, average='macro', zero_division=0)
+    icm_prec, icm_rec, _, _ = precision_recall_fscore_support(all_icm_true, all_icm_pred, average='macro', zero_division=0)
+    te_prec, te_rec, _, _ = precision_recall_fscore_support(all_te_true, all_te_pred, average='macro', zero_division=0)
+
+    print("\n==================================================")
+    print("FINAL CLINICAL METRICS (CHAMPION SWIN-T BASELINE)")
+    print("==================================================")
+    print("\nEXPANSION RESULTS:")
+    print(f"  Accuracy: {exp_acc*100:.2f}% | QWK: {exp_qwk:.4f}")
+    
+    print("\nICM RESULTS:")
+    print(f"  Accuracy: {icm_acc*100:.2f}% | QWK: {icm_qwk:.4f}")
+    
+    print("\nTE RESULTS:")
+    print(f"  Accuracy: {te_acc*100:.2f}% | QWK: {te_qwk:.4f}")
+
+    print("\n==================================================")
+    print("MACRO-AVERAGED METRICS")
+    print("==================================================")
+    print(f"EXP - Precision: {exp_prec*100:.2f}% | Recall: {exp_rec*100:.2f}%")
+    print(f"ICM - Precision: {icm_prec*100:.2f}% | Recall: {icm_rec*100:.2f}%")
+    print(f"TE  - Precision: {te_prec*100:.2f}% | Recall: {te_rec*100:.2f}%")
+    print("==================================================\n")
+
+    plot_confusion_matrix(all_exp_true, all_exp_pred, ['1', '2', '3', '4', '5'], 'Champion Baseline - Expansion', 'cm_exp_baseline.png')
+    plot_confusion_matrix(all_icm_true, all_icm_pred, ['A', 'B', 'C'], 'Champion Baseline - ICM', 'cm_icm_baseline.png')
+    plot_confusion_matrix(all_te_true, all_te_pred, ['A', 'B', 'C'], 'Champion Baseline - TE', 'cm_te_baseline.png')
+    
+    print(f"✅ All evaluation plots saved successfully to: {SAVE_DIR}")
 
 if __name__ == "__main__":
-    main()
+    evaluate_mc_dropout()
