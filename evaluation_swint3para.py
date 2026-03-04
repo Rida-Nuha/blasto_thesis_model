@@ -25,7 +25,7 @@ TEST_DATA_PATH = "/kaggle/input/dataset/Gardner_test_silver.csv"
 IMG_FOLDER = "/kaggle/input/dataset/Images/Images"
 
 # This should point to the exact file saved in the previous step
-MODEL_PATH = "/kaggle/working/saved_models/multitask/multitask_seed42_best.pth" 
+MODEL_PATH = "/kaggle/working/saved_models/swin_focal_champion/swin_focal_seed42_best.pth" 
 OUTPUT_DIR = "/kaggle/working/evaluation_plots"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
