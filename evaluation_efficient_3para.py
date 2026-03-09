@@ -27,7 +27,7 @@ TEST_DATA_PATH = "/kaggle/input/datasets/ridakhan09/dataset/Gardner_test_gold.xl
 IMG_FOLDER = "/kaggle/input/datasets/ridakhan09/dataset/Images/Images"
 
 # 🚨 Points to the new EfficientNet-B0 saved model
-MODEL_PATH = "/kaggle/working/saved_models/efficientnet_b0_champion_baseline/efficientnet_b0_multitask_seed42_best.pth"
+MODEL_PATH = "/kaggle/working/saved_models/efficientnet_b0_baseline"
 SAVE_DIR = "/kaggle/working/evaluation_plots_efficientnet_b0_baseline"
 
 NUM_CLASSES_EXP = 5  
